@@ -1,0 +1,1472 @@
+================================================================================
+  DeepSeek-V3 Project ရှင်းလင်းချက် (မြန်မာဘာသာ)
+================================================================================
+
+မာတိကာ
+  အပိုင်း ၁။ Project ခြုံငုံသုံးသပ်ချက်
+  အပိုင်း ၂။ kernel.py  : FP8 GPU kernel များ
+  အပိုင်း ၃။ generate.py : စာသားထုတ်ပေးခြင်း
+  အပိုင်း ၄။ MoE        : Expert ရွေးပုံ
+  အပိုင်း ၅။ MLA        : Attention နဲ့ KV Cache ချုံ့ပုံ
+  အပိုင်း ၆။ RoPE + YaRN : Position ကို မော်ဒယ်က ဘယ်လိုသိလဲ
+
+
+################################################################################
+  အပိုင်း ၁။ Project ခြုံငုံသုံးသပ်ချက်
+################################################################################
+
+၁.၁ ဒီ project က ဘာလဲ
+--------------------------------------------------------------------------------
+DeepSeek-V3 ဆိုတာ DeepSeek-AI ကုမ္ပဏီက ထုတ်ထားတဲ့ Large Language Model (LLM)
+တစ်ခုပါ။ ChatGPT လို စာသားတွေကို နားလည်ပြီး စာသားအသစ် ထုတ်ပေးနိုင်တဲ့ AI
+မော်ဒယ်ပါ။
+
+ဒီ repository ထဲမှာ training code မပါပါဘူး။ ပါတာက:
+  - နည်းပညာစာတမ်း (DeepSeek_V3.pdf)
+  - မော်ဒယ်ကို run ဖို့ (inference) ရေးထားတဲ့ ရိုးရှင်းတဲ့ reference code
+    (စုစုပေါင်း Python ~၁၄၀၀ လိုင်းခန့်)
+
+Model weights (လေ့ကျင့်ပြီးသား parameter တွေ) ကိုတော့ HuggingFace ကနေ
+သီးသန့် download လုပ်ရပါတယ်။
+
+၁.၂ အဓိက အချက်အလက်များ
+--------------------------------------------------------------------------------
+  စုစုပေါင်း parameter                    : 671B (၆၇၁ ဘီလီယံ)
+  Token တစ်ခုချင်းစီအတွက် သုံးတဲ့ parameter : 37B ပဲ
+  Layer အရေအတွက်                          : 61
+  Context length                          : 128K tokens
+  Weight format                           : FP8
+
+၁.၃ အဓိက နည်းပညာ ၃ ခု
+--------------------------------------------------------------------------------
+(က) Mixture-of-Experts (MoE)
+  - Layer တစ်ခုစီမှာ Expert (သေးငယ်တဲ့ neural network) ၂၅၆ ခု ရှိပါတယ်။
+  - Token တစ်ခုဝင်လာတိုင်း Gate က အသင့်တော်ဆုံး Expert ၈ ခုကိုပဲ ရွေးပြီး
+    အလုပ်လုပ်ခိုင်းပါတယ်။ ဒါ့အပြင် အမြဲတမ်းသုံးတဲ့ shared expert ၁ ခုလည်း
+    ရှိပါတယ်။
+  - ဒါကြောင့် မော်ဒယ်က ကြီးပေမယ့် တွက်ချက်ရတာ သက်သာပါတယ်။ ဆေးရုံကြီးမှာ
+    ဆရာဝန် ၂၅၆ ယောက်ရှိပေမယ့် လူနာတစ်ယောက်ကို သက်ဆိုင်ရာ ဆရာဝန် ၈ ယောက်ပဲ
+    ကြည့်ပေးတာနဲ့ တူပါတယ်။
+  - Code: inference/model.py:532 (Gate), inference/model.py:633 (MoE)
+
+(ခ) Multi-head Latent Attention (MLA)
+  - ပုံမှန် attention မှာ Key/Value cache က memory အများကြီး စားပါတယ်။
+  - MLA က KV ကို rank 512 ရှိတဲ့ low-rank vector သေးသေးလေးအဖြစ် ချုံ့ပြီး
+    သိမ်းပါတယ်။ ဒါကြောင့် စာရှည်ရှည် (128K) ကို memory နည်းနည်းနဲ့
+    ကိုင်တွယ်နိုင်ပါတယ်။
+  - Code: inference/model.py:393 (MLA)
+
+(ဂ) FP8 Precision
+  - Weight တွေကို 8-bit floating point နဲ့ သိမ်းထားလို့ memory နဲ့ အမြန်နှုန်းမှာ
+    အကျိုးရှိပါတယ်။
+  - Block (128x128) တစ်ခုချင်းစီအတွက် scale factor သီးသန့် ထားပြီး တိကျမှု
+    မကျအောင် လုပ်ထားပါတယ်။
+  - Code: inference/kernel.py (Triton GPU kernel တွေ)
+
+ဒါ့အပြင် Auxiliary-loss-free load balancing (Expert တွေကြား အလုပ်ကို loss
+အပိုမသုံးဘဲ မျှဝေနည်း) နဲ့ Multi-Token Prediction (MTP) (token တစ်ခုထက်ပိုပြီး
+ကြိုခန့်မှန်းနည်း) တို့ကိုလည်း သုံးထားပါတယ်။
+
+၁.၄ ဖိုင်တစ်ခုချင်းစီရဲ့ တာဝန်
+--------------------------------------------------------------------------------
+  inference/
+  ├── model.py          ← မော်ဒယ် architecture တစ်ခုလုံး
+  ├── kernel.py         ← FP8 တွက်ချက်မှုအတွက် GPU kernel များ
+  ├── generate.py       ← စာသားထုတ်ပေးခြင်း (chat / batch)
+  ├── convert.py        ← HuggingFace weights ကို GPU အများအပြားသုံးဖို့ ခွဲပေးခြင်း
+  ├── fp8_cast_bf16.py  ← FP8 weights ကို BF16 အဖြစ် ပြောင်းခြင်း
+  └── configs/          ← 16B / 236B / 671B မော်ဒယ် setting များ
+
+model.py ထဲက အဓိက class များ:
+  - ModelArgs           : hyperparameter များ
+  - ParallelEmbedding, ColumnParallelLinear, RowParallelLinear
+                        : GPU အများအပြားပေါ် ခွဲပြီး run လို့ရအောင် (tensor parallelism)
+  - RMSNorm             : normalization
+  - precompute_freqs_cis / apply_rotary_emb
+                        : RoPE (YaRN ပါ) position encoding, context ရှည်ရှည်အတွက်
+  - MLA                 : attention
+  - MLP                 : ပထမ dense layer ၃ ခုမှာ သုံးတဲ့ ပုံမှန် feed-forward
+  - Gate, Expert, MoE   : Mixture-of-Experts
+  - Block               : Attention + FFN ကို ပေါင်းထားတဲ့ transformer layer တစ်ခု
+  - Transformer         : Layer ၆၁ ခုကို စုထားတဲ့ မော်ဒယ်တစ်ခုလုံး
+
+၁.၅ အသုံးပြုပုံ အဆင့်ဆင့်
+--------------------------------------------------------------------------------
+  # 1. Dependencies ထည့်ခြင်း
+  pip install -r inference/requirements.txt
+
+  # 2. HuggingFace weights ကို GPU 16 လုံးအတွက် ခွဲခြင်း
+  python convert.py --hf-ckpt-path /path/to/DeepSeek-V3 \
+    --save-path /path/to/DeepSeek-V3-Demo --n-experts 256 --model-parallel 16
+
+  # 3. Chat လုပ်ခြင်း (node 2 ခု x GPU 8 လုံး)
+  torchrun --nnodes 2 --nproc-per-node 8 ... generate.py \
+    --ckpt-path /path/to/DeepSeek-V3-Demo \
+    --config configs/config_671B.json --interactive --temperature 0.7
+
+[သတိပြုရန်] 671B မော်ဒယ်ကို run ဖို့ အလွန်ကြီးမားတဲ့ GPU cluster လိုပါတယ်
+(H100/H800 ကဲ့သို့ GPU ၁၆ လုံးလောက်)။ ကွန်ပျူတာ (Mac) တစ်လုံးတည်းမှာ
+မ run နိုင်ပါဘူး။ Linux + NVIDIA GPU လိုပါတယ်။ စမ်းချင်ရင် SGLang, vLLM,
+LMDeploy လို framework တွေ၊ ဒါမှမဟုတ် DeepSeek ရဲ့ API ကို သုံးတာ ပိုလွယ်ပါတယ်။
+
+၁.၆ License
+--------------------------------------------------------------------------------
+  - Code         : MIT License (LICENSE-CODE)
+  - Model weights: DeepSeek Model License (LICENSE-MODEL), စီးပွားရေးအတွက်လည်း
+                   သုံးခွင့်ရှိပါတယ်။
+
+
+################################################################################
+  အပိုင်း ၂။ kernel.py : FP8 GPU kernel များ
+################################################################################
+
+၂.၀ အခြေခံ သဘောတရား
+--------------------------------------------------------------------------------
+FP8 (float8_e4m3fn) ဆိုတာ 8-bit ပဲသုံးတဲ့ ဂဏန်းပုံစံပါ။ ဖော်ပြနိုင်တဲ့
+အကြီးဆုံးတန်ဖိုးက ±448 ပဲ ဖြစ်ပါတယ်။ ဒါကြောင့် ဂဏန်းတွေကို FP8 ထဲ မထည့်ခင်
+scale (ချဲ့/ချုံ့ကိန်း) နဲ့ စားပြီး range ထဲ ဝင်အောင် လုပ်ရပါတယ်:
+
+  quantize:    y = x / s        (FP8 အဖြစ် သိမ်း)
+  dequantize:  x ≈ y * s        (မူလတန်ဖိုး ပြန်ရ)
+
+Tensor တစ်ခုလုံးအတွက် scale တစ်ခုတည်း မသုံးဘဲ ဂဏန်း ၁၂၈ လုံးစီ (block)
+အတွက် scale သီးသန့် ထားပါတယ်။ ဒါကို block-wise quantization လို့ ခေါ်ပါတယ်။
+တန်ဖိုးကြီးတဲ့ ဂဏန်းတစ်လုံးကြောင့် တခြား ဂဏန်းသေးသေးလေးတွေရဲ့ တိကျမှု
+မပျက်စေဖို့ပါ။
+
+Triton ဆိုတာ GPU kernel တွေကို Python နဲ့ ရေးလို့ရတဲ့ language ပါ။
+@triton.jit ပါတဲ့ function တွေက GPU ပေါ်မှာ program (thread block) အများကြီး
+ပြိုင်တူ run ပါတယ်။ Program တစ်ခုစီက data အပိုင်းတစ်ပိုင်းစီကို
+တာဝန်ယူပါတယ်။
+
+ဖိုင်ထဲမှာ အပိုင်း ၃ ပိုင်း ရှိပြီး အပိုင်းတိုင်းမှာ GPU kernel (@triton.jit)
+နဲ့ အဲဒါကို ခေါ်ပေးတဲ့ Python wrapper တစ်စုံစီ ပါပါတယ်။
+
+Line 1-6: Import များ
+  from typing import Tuple
+  import torch
+  import triton
+  import triton.language as tl  # GPU kernel ထဲမှာ သုံးတဲ့ function များ (tl.load, tl.dot ...)
+  from triton import Config      # autotune setting များအတွက်
+
+၂.၁ act_quant: Activation ကို FP8 ပြောင်းခြင်း (Line 9-52)
+--------------------------------------------------------------------------------
+Layer တစ်ခုထဲ ဝင်လာတဲ့ input (activation) x ကို FP8 အဖြစ် ပြောင်းပါတယ်။
+
+[Kernel, Line 9-30]
+
+  23  pid = tl.program_id(axis=0)
+      "ငါက program နံပါတ် ဘယ်လောက်လဲ" ဆိုတာကို ယူပါတယ်။
+      Program တစ်ခု = block (ဂဏန်း ၁၂၈ လုံး) တစ်ခုပါ။
+
+  24  offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+      ဒီ program ကိုင်တွယ်ရမယ့် index တွေကို တွက်ပါတယ်။
+      ဥပမာ pid=2, BLOCK_SIZE=128 ဆိုရင် offs = [256, 257, ..., 383]
+
+  25  x = tl.load(x_ptr + offs).to(tl.float32)
+      GPU memory ကနေ ဂဏန်း ၁၂၈ လုံးကို ဖတ်ပြီး တိကျမှုအတွက် float32 ပြောင်းပါတယ်။
+
+  26  s = tl.max(tl.abs(x)) / 448.
+      အရေးအကြီးဆုံး လိုင်းပါ။ Block ထဲက အကြီးဆုံး absolute value ကို 448
+      (FP8 max) နဲ့ စားပြီး scale ရပါတယ်။
+      ဥပမာ max က 896 ဆိုရင် s = 2 ဖြစ်ပြီး 896/2 = 448 ဆိုတော့ FP8 range ထဲ
+      အတိအကျ ဝင်ပါတယ်။
+
+  27  y = x / s
+  28  y = y.to(y_ptr.dtype.element_ty)    # FP8 အဖြစ် ပြောင်း
+  29  tl.store(y_ptr + offs, y)           # quantized value သိမ်း
+  30  tl.store(s_ptr + pid, s)            # block တစ်ခုလျှင် scale တစ်ခု သိမ်း
+
+  [သတိပြုစရာ] Block တစ်ခုလုံး 0 တွေချည်းဖြစ်နေရင် s = 0 ဖြစ်ပြီး x / s က
+  0/0 = NaN ထွက်ပါလိမ့်မယ်။ ဒီ reference code မှာ အဲဒီ case ကို ကာကွယ်ထားတာ
+  မရှိပါဘူး။
+
+[Wrapper, Line 33-52]
+
+  46  assert x.is_contiguous()             # memory မှာ ဆက်တိုက် စီထားမှ pointer arithmetic မှန်မယ်
+  47  assert x.size(-1) % block_size == 0  # နောက်ဆုံး dimension က 128 ရဲ့ ဆတိုးကိန်း ဖြစ်ရမယ်
+  48  y = torch.empty_like(x, dtype=torch.float8_e4m3fn)   # output (FP8)
+  49  s = x.new_empty(*x.size()[:-1], x.size(-1) // block_size, dtype=torch.float32)
+      x ရဲ့ shape က (batch, seq, 7168) ဆိုရင် s ရဲ့ shape က
+      (batch, seq, 7168/128 = 56) ဖြစ်ပါတယ်။ token တစ်ခုစီမှာ scale ၅၆ ခုစီ ရှိပါတယ်။
+
+  50  grid = lambda meta: (triton.cdiv(x.numel(), meta['BLOCK_SIZE']), )
+      Program ဘယ်နှစ်ခု launch မလဲ တွက်ပါတယ်: စုစုပေါင်း element ÷ 128
+      (အပေါ် ပိုင်းခြင်း, ceil division)
+
+  51  act_quant_kernel[grid](x, y, s, BLOCK_SIZE=block_size)   # GPU ပေါ် run
+  52  return y, s
+
+၂.၂ weight_dequant: Weight ကို FP8 ကနေ ပြန်ချဲ့ခြင်း (Line 55-105)
+--------------------------------------------------------------------------------
+Weight တွေကို 128x128 ရှိတဲ့ 2D block တွေနဲ့ quantize လုပ်ထားပါတယ်
+(activation က 1D block ၁၂၈ ဖြစ်တာနဲ့ မတူပါဘူး)။ ဒီ function က FP8 weight ကို
+BF16 အဖြစ် ပြန်ပြောင်းပေးပါတယ်။
+
+[Kernel, Line 55-81]
+
+  71  pid_m = tl.program_id(axis=0)    # row ဘက် block နံပါတ်
+  72  pid_n = tl.program_id(axis=1)    # column ဘက် block နံပါတ်
+  73  n = tl.cdiv(N, BLOCK_SIZE)       # column ဘက်မှာ block ဘယ်နှစ်ခု ရှိလဲ
+      ဒီတစ်ခါ grid က 2D ဖြစ်ပါတယ်။ Program တစ်ခုက 128x128 tile တစ်ခုကို ကိုင်ပါတယ်။
+
+  74  offs_m = pid_m * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)   # row index ၁၂၈ ခု
+  75  offs_n = pid_n * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)   # col index ၁၂၈ ခု
+  76  offs = offs_m[:, None] * N + offs_n[None, :]
+      Broadcasting သုံးပြီး 2D index ဇယား (128x128) ဆောက်ပါတယ်။
+      [:, None] က column vector, [None, :] က row vector ပါ။ ပေါင်းလိုက်ရင်
+      matrix ဖြစ်ပါတယ်။ Row-major memory မှာ (row, col) ရဲ့ နေရာ = row * N + col
+
+  77  mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+      Matrix အရွယ်အစားက 128 နဲ့ အတိအကျ မစားလို့ရရင် အစွန်ဆုံး block က matrix
+      အပြင်ဘက် ကျော်သွားနိုင်ပါတယ်။ mask က အပြင်ဘက်ကို မဖတ်/မရေးအောင် တားပါတယ်။
+
+  78  x = tl.load(x_ptr + offs, mask=mask).to(tl.float32)
+  79  s = tl.load(s_ptr + pid_m * n + pid_n)    # ဒီ tile ရဲ့ scale တစ်ခုတည်း
+  80  y = x * s                                  # dequantize
+  81  tl.store(y_ptr + offs, y, mask=mask)
+      Line 79: Scale tensor s ရဲ့ shape က (M/128, N/128) ပါ။ Tile (pid_m, pid_n)
+      ရဲ့ scale ကို ယူပါတယ်။
+
+[Wrapper, Line 84-105]
+
+  99   assert x.is_contiguous() and s.is_contiguous()
+  100  assert x.dim() == 2 and s.dim() == 2           # 2D matrix ပဲ လက်ခံ
+  101  M, N = x.size()
+  102  y = torch.empty_like(x, dtype=torch.get_default_dtype())   # BF16 output
+  103  grid = lambda meta: (triton.cdiv(M, ...), triton.cdiv(N, ...))   # 2D grid
+  104  weight_dequant_kernel[grid](x, s, y, M, N, BLOCK_SIZE=block_size)
+
+  [မှတ်ချက်] Docstring (line 90) မှာ s ရဲ့ shape ကို (M, N) လို့ ရေးထားပေမယ့်
+  တကယ်က (ceil(M/128), ceil(N/128)) ဖြစ်ပါတယ်။ Documentation အမှားလေး တစ်ခုပါ။
+
+၂.၃ fp8_gemm: FP8 Matrix Multiplication (Line 108-191)
+--------------------------------------------------------------------------------
+ဖိုင်ရဲ့ အဓိကအပိုင်းပါ။ C = A x Bᵀ ကို FP8 နဲ့ တွက်ပါတယ်။
+  - A = activation (M, K), scale က 1D block (row တစ်ခုစီ၊ K ဘက် ၁၂၈ လုံးစီ)
+  - B = weight (N, K), scale က 128x128 block
+
+[Autotune config, Line 108-113]
+
+  108 fp8_gemm_configs = [
+  109     Config({'BLOCK_SIZE_M': block_m, 'BLOCK_SIZE_N': block_n, 'BLOCK_SIZE_K': 128},
+                 num_stages=num_stages, num_warps=8)
+  110     for block_m in [16, 32, 64] for block_n in [32, 64, 128] for num_stages in [3, 4, 5, 6]
+  111 ]
+  113 @triton.autotune(configs=fp8_gemm_configs, key=['N', 'K'])
+
+  - Tile အရွယ်အစား ပေါင်းစပ်ပုံ 3 x 3 x 4 = 36 မျိုး ကို ဆောက်ပါတယ်။
+  - @triton.autotune က ပထမဆုံး run တဲ့အခါ ၃၆ မျိုးလုံး စမ်းပြီး အမြန်ဆုံး
+    တစ်ခုကို ရွေးမှတ်ထားပါတယ်။ N, K တန်ဖိုး အသစ်တွေ့တိုင်း ပြန်စမ်းပါတယ်။
+  - BLOCK_SIZE_K က 128 အမြဲ ဖြစ်ရပါတယ်။ Scale block 128 နဲ့ ကိုက်ညီမှ K-tile
+    တစ်ခုမှာ scale တစ်ခုတည်း သုံးလို့ရလို့ပါ။
+  - num_stages = memory ကနေ data ကြိုဖတ်ထားမယ့် pipeline အဆင့်၊
+    num_warps=8 = program တစ်ခုမှာ thread 256 ခု။
+
+[Kernel: Pointer ပြင်ဆင်ခြင်း, Line 140-149]
+
+  140 pid_m = tl.program_id(axis=0)
+  141 pid_n = tl.program_id(axis=1)
+  142 k = tl.cdiv(K, BLOCK_SIZE_K)        # K ဘက်မှာ tile ဘယ်နှစ်ခု (loop အကြိမ်ရေ)
+  143 offs_m = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+  144 offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+      Line 143-144 ရဲ့ % M, % N က လှည့်ကွက်လေး တစ်ခုပါ။ Matrix အစွန်ကို
+      ကျော်သွားတဲ့ index တွေကို အစကို ပြန်လှည့် (wrap) စေပါတယ်။ ဒါကြောင့် mask
+      မလိုဘဲ memory ကို လုံခြုံစွာ ဖတ်နိုင်ပါတယ်။ ရလာတဲ့ အပိုတန်ဖိုးတွေကိုတော့
+      နောက်ဆုံး store လုပ်တဲ့အခါ mask နဲ့ လွှင့်ပစ်ပါတယ်။
+
+  145 offs_k = tl.arange(0, BLOCK_SIZE_K)                       # [0..127]
+  146 a_ptrs = a_ptr + offs_m[:, None] * K + offs_k[None, :]    # A tile: (BM x 128)
+  147 b_ptrs = b_ptr + offs_n[None, :] * K + offs_k[:, None]    # B tile: (128 x BN)
+      Line 147 က transpose လှည့်ကွက် ပါ။ B က memory ထဲမှာ (N, K) ပုံစံနဲ့ ရှိပေမယ့်
+      index ကို [k, n] ပုံစံ ဆောက်လိုက်တော့ ဖတ်လိုက်တာနဲ့ Bᵀ tile (K x N) ရပါတယ်။
+      Transpose ကို memory မှာ အမှန်တကယ် မလုပ်ရဘဲ ရပါတယ်။
+
+  148 a_s_ptrs = a_s_ptr + offs_m * k
+  149 b_s_ptrs = b_s_ptr + (offs_n // BLOCK_SIZE_K) * k
+      - Line 148: a_s ရဲ့ shape (M, k) ပါ။ Row တစ်ခုစီရဲ့ ပထမ scale ကို ညွှန်ပါတယ်။
+      - Line 149: b_s ရဲ့ shape (N/128, k) ပါ။ Weight row ၁၂၈ ခုက scale တစ်ခုတည်း
+        မျှသုံးလို့ offs_n // 128 နဲ့ block row ကို ရှာပါတယ်။
+
+[Kernel: အဓိက Loop, Line 151-161]
+
+  151 accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+      ရလဒ်ကို float32 နဲ့ စုပေါင်းပါတယ်။ FP8 နဲ့ ပေါင်းရင် တိကျမှု အများကြီး
+      ဆုံးရှုံးမှာမို့လို့ပါ။
+
+  152 for i in range(k):                     # K ဘက်ကို 128 စီ ရွှေ့သွား
+  153     a = tl.load(a_ptrs, mask=offs_k[None, :] < K - i * BLOCK_SIZE_K, other=0.0)
+  154     b = tl.load(b_ptrs, mask=offs_k[:, None] < K - i * BLOCK_SIZE_K, other=0.0)
+      K - i*128 = ကျန်သေးတဲ့ column အရေအတွက်ပါ။ နောက်ဆုံး tile မပြည့်ရင်
+      ပိုနေတဲ့နေရာတွေကို 0 ထည့်ပါတယ်။ 0 က ပေါင်းလဒ်ကို မပြောင်းလဲစေပါဘူး။
+
+  155     a_s = tl.load(a_s_ptrs)            # shape (BM,)  row တစ်ခုစီရဲ့ scale
+  156     b_s = tl.load(b_s_ptrs)            # shape (BN,)  col တစ်ခုစီရဲ့ scale
+  157     accumulator += tl.dot(a, b) * a_s[:, None] * b_s[None, :]
+
+      Line 157 က kernel ရဲ့ နှလုံးသားပါ:
+        1. tl.dot(a, b): FP8 x FP8 matrix multiply ကို GPU ရဲ့ Tensor Core နဲ့
+           အမြန်တွက်ပါတယ်။
+        2. * a_s[:, None] * b_s[None, :]: ရလဒ်ကို scale နှစ်ခုနဲ့ မြှောက်ပြီး
+           တကယ့်တန်ဖိုး ပြန်ရပါတယ်။
+
+      သင်္ချာအရ ဘာကြောင့် မှန်လဲ:
+          (a·sa) x (b·sb) = (a x b) · sa · sb
+      K-tile တစ်ခုအတွင်းမှာ scale တွေက ကိန်းသေ ဖြစ်လို့ မြှောက်ပြီးမှ scale ကို
+      ထုတ်မြှောက်လို့ ရပါတယ်။ ဒါကြောင့် BLOCK_SIZE_K = 128 အမြဲ ဖြစ်ရတာပါ။
+
+  158     a_ptrs += BLOCK_SIZE_K            # နောက် K-tile ဆီ ရွှေ့
+  159     b_ptrs += BLOCK_SIZE_K
+  160     a_s_ptrs += 1                     # နောက် scale ဆီ ရွှေ့
+  161     b_s_ptrs += 1
+
+[Kernel: ရလဒ်သိမ်းခြင်း, Line 162-167]
+
+  162 c = accumulator.to(c_ptr.dtype.element_ty)     # float32 → BF16
+  163 offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)   # % M မပါတော့ (မူလ index)
+  164 offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+  165 c_ptrs = c_ptr + offs_m[:, None] * N + offs_n[None, :]
+  166 mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)         # အပြင်ဘက်ကို မရေးရ
+  167 tl.store(c_ptrs, c, mask=mask)
+      Line 163-164 မှာ % ကို ဖြုတ်ပြီး index ကို ပြန်တွက်ပါတယ်။ Wrap ဖြစ်ခဲ့တဲ့
+      အပို row/col တွေကို mask က လွှင့်ပစ်ပါတယ်။
+
+[Wrapper, Line 170-191]
+
+  185 K = a.size(-1)              # input feature အရေအတွက်
+  186 M = a.numel() // K          # batch x seq ကို ပြားလိုက် (flatten)
+  187 N = b.size(0)               # output feature အရေအတွက်
+  188 c = a.new_empty(*a.size()[:-1], N, dtype=torch.get_default_dtype())
+  189 grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']), triton.cdiv(N, META['BLOCK_SIZE_N']))
+  190 fp8_gemm_kernel[grid](a, b, c, a_s, b_s, M, N, K)
+      Line 186: a က (batch, seq, K) ဖြစ်နေရင်လည်း M = batch x seq အဖြစ် 2D
+      matrix လို သဘောထားပါတယ်။
+      Line 189: Grid က META ကို သုံးတာက autotune ရွေးလိုက်တဲ့ tile size ပေါ်
+      မူတည်ပြီး program အရေအတွက် ပြောင်းလို့ပါ။
+
+၂.၄ ဒီ function တွေကို ဘယ်မှာ သုံးလဲ: model.py:129-161
+--------------------------------------------------------------------------------
+  def linear(x, weight, bias=None):
+      if weight.element_size() > 1:          # weight က BF16/FP32 (quantize မထားဘူး)
+          return F.linear(x, weight, bias)   # → ပုံမှန် PyTorch
+      elif gemm_impl == "bf16":              # weight FP8, ဒါပေမယ့် BF16 နဲ့ တွက်မယ်
+          weight = weight_dequant(weight, weight.scale)   # ← ၂.၂
+          return F.linear(x, weight, bias)
+      else:                                  # FP8 အပြည့်
+          x, scale = act_quant(x, block_size)             # ← ၂.၁
+          y = fp8_gemm(x, scale, weight, weight.scale)    # ← ၂.၃
+          ...
+
+  Data စီးဆင်းပုံ:
+    x (BF16) ──act_quant──▶ x_fp8 + x_scale ─┐
+                                              ├──fp8_gemm──▶ y (BF16)
+    weight (FP8) + weight.scale ─────────────┘
+
+၂.၅ အနှစ်ချုပ်
+--------------------------------------------------------------------------------
+  Function        | လုပ်ဆောင်ချက်                       | Block ပုံစံ
+  ----------------+-------------------------------------+----------------
+  act_quant       | Activation: BF16 → FP8              | 1D, ၁၂၈ လုံး
+  weight_dequant  | Weight: FP8 → BF16                  | 2D, 128x128
+  fp8_gemm        | FP8 x FP8 matmul + scale ပြန်မြှောက် | K-tile = 128
+
+
+################################################################################
+  အပိုင်း ၃။ generate.py : စာသားထုတ်ပေးခြင်း
+################################################################################
+
+၃.၀ ခြုံငုံသုံးသပ်ချက်
+--------------------------------------------------------------------------------
+generate.py က မော်ဒယ်ကို load လုပ်ပြီး စာသားထုတ်ပေးတဲ့ program ပါ။
+အလုပ်လုပ်ပုံ mode ၂ မျိုး ရှိပါတယ်:
+  - Interactive mode : ChatGPT လို terminal ထဲမှာ အပြန်အလှန် စကားပြောတာပါ။
+  - Batch mode       : ဖိုင်ထဲက မေးခွန်းအများကြီးကို တစ်ပြိုင်နက် ဖြေတာပါ။
+
+ဖိုင်ထဲမှာ function ၃ ခု ရှိပါတယ်:
+  sample()    : ဖြစ်နိုင်ခြေ (probability) ပေါ်မူတည်ပြီး နောက် token တစ်ခုကို ရွေးတယ်
+  generate()  : Token တွေကို တစ်ခုပြီးတစ်ခု ထုတ်တဲ့ loop
+  main()      : မော်ဒယ် load၊ GPU setup၊ user input ကိုင်တွယ်မှု
+
+Line 1-11: Import များ
+  import torch.distributed as dist            # GPU အများအပြားကြား ဆက်သွယ်ဖို့
+  from transformers import AutoTokenizer      # စာသား ↔ token ID ပြောင်းဖို့ (HuggingFace)
+  from safetensors.torch import load_model    # weight ဖိုင် (.safetensors) ဖတ်ဖို့
+  from model import Transformer, ModelArgs    # model.py ထဲက မော်ဒယ်
+
+၃.၁ sample(): နောက် token ကို ရွေးခြင်း (Line 14-27)
+--------------------------------------------------------------------------------
+မော်ဒယ်က token ၁၂၉,၂၈၀ ခု (vocabulary တစ်ခုလုံး) အတွက် logits (ရမှတ်)
+ထုတ်ပေးပါတယ်။ အဲဒီထဲက တစ်ခုကို ရွေးရပါမယ်။
+
+  25  logits = logits / max(temperature, 1e-5)
+      Temperature နဲ့ စားပါတယ်:
+      - Temperature နိမ့် (ဥပမာ 0.2): ရမှတ်ကွာခြားချက်တွေ ပိုကြီးလာပြီး
+        အဖြစ်နိုင်ဆုံး token ကိုပဲ အမြဲနီးပါး ရွေးပါတယ်။ အဖြေတွေ တည်ငြိမ်ပါတယ်။
+      - Temperature မြင့် (ဥပမာ 1.5): ရမှတ်တွေ ညီညာလာပြီး ကျပန်းဆန်ဆန်
+        ရွေးပါတယ်။ ဖန်တီးမှု ပိုရှိပေမယ့် အမှားလည်း ပိုများပါတယ်။
+      - max(..., 1e-5) က သုညနဲ့ စားမိတာကို ကာကွယ်ပါတယ်။
+
+  26  probs = torch.softmax(logits, dim=-1)
+      ရမှတ်တွေကို ဖြစ်နိုင်ခြေ (ပေါင်းလဒ် = 1) အဖြစ် ပြောင်းပါတယ်။
+
+  27  return probs.div_(torch.empty_like(probs).exponential_(1)).argmax(dim=-1)
+      ဒီလိုင်းက လှည့်ကွက် (trick) တစ်ခုပါ။ ပုံမှန်ဆိုရင်
+      torch.multinomial(probs, 1) သုံးပြီး ကျပန်းရွေးကြပါတယ်။ ဒီမှာတော့:
+        1. Token တစ်ခုစီအတွက် Exponential(1) distribution ကနေ ကျပန်းဂဏန်း E
+           တစ်ခုစီ ထုတ်ပါတယ်။
+        2. probs / E ကို တွက်ပါတယ်။
+        3. အကြီးဆုံးကို argmax နဲ့ ရွေးပါတယ်။
+      သင်္ချာအရ ဒီနည်းက probs အတိုင်း ကျပန်းရွေးတာနဲ့ အတိအကျ တူညီပါတယ်
+      (Exponential race / Gumbel-max trick)။ GPU ပေါ်မှာ multinomial ထက်
+      မြန်ပြီး synchronization မလိုတာ အားသာချက်ပါ။
+      ဥပမာ: probs = [0.7, 0.2, 0.1] ဆိုရင် token 0 ကို အကြိမ် ၁၀၀ မှာ
+      ~၇၀ ကြိမ်လောက် ရွေးပါလိမ့်မယ်။
+
+၃.၂ generate(): စာသားထုတ်တဲ့ Loop (Line 30-78)
+--------------------------------------------------------------------------------
+  30  @torch.inference_mode()
+      Gradient မတွက်ဖို့ ပြောတာပါ (training မဟုတ်လို့)။ Memory သက်သာပြီး
+      ပိုမြန်ပါတယ်။
+
+[ပြင်ဆင်ခြင်း, Line 51-59]
+
+  51  prompt_lens = [len(t) for t in prompt_tokens]
+  52  assert max(prompt_lens) <= model.max_seq_len
+  53  total_len = min(model.max_seq_len, max_new_tokens + max(prompt_lens))
+      - prompt_tokens က list of lists ပါ (batch ထဲက မေးခွန်းတစ်ခုစီရဲ့ token တွေ)။
+      - max_seq_len က default 16,384 (model.py:55) ဖြစ်ပါတယ်။ Prompt က ဒီထက်
+        ရှည်ရင် error တက်ပါမယ်။
+      - total_len = prompt အရှည်ဆုံး + ထုတ်မယ့် token အရေအတွက်
+        (max_seq_len ထက် မကျော်စေရ)။
+
+  54  tokens = torch.full((len(prompt_tokens), total_len), -1, dtype=torch.long, device="cuda")
+  55  for i, t in enumerate(prompt_tokens):
+  56      tokens[i, :len(t)] = torch.tensor(t, ...)
+      (batch, total_len) ဇယားကို -1 (နေရာလွတ်) တွေနဲ့ ဖြည့်ပြီး prompt တွေကို
+      ရှေ့ဆုံးမှာ ထည့်ပါတယ်။
+      ဥပမာ prompt ၂ ခု (အရှည် 3 နဲ့ 5)၊ total_len = 8:
+        row 0:  [a1 a2 a3 -1 -1 -1 -1 -1]
+        row 1:  [b1 b2 b3 b4 b5 -1 -1 -1]
+
+  57  prev_pos = 0                                                # KV cache ထဲ ဘယ်အထိ ရောက်ပြီလဲ
+  58  finished = torch.tensor([False] * len(prompt_tokens), ...)  # sequence တစ်ခုစီ ပြီးပြီလား
+  59  prompt_mask = tokens != -1                                  # prompt နေရာ = True
+
+[အဓိက Loop, Line 60-71]
+
+  60  for cur_pos in range(min(prompt_lens), total_len):
+      Prompt အတိုဆုံးရဲ့ အဆုံး ကနေ စပါတယ်။ အပေါ်က ဥပမာမှာ cur_pos = 3 ကနေ စပါတယ်။
+
+  61      logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+      KV Cache ရဲ့ အရေးပါပုံ ဒီမှာ မြင်ရပါတယ်:
+      - ပထမအကြိမ် (prev_pos=0, cur_pos=3): token 0-2 ကို တစ်ခါတည်း ထည့်ပါတယ်
+        (prefill)။
+      - နောက်အကြိမ်တွေ (prev_pos=3, cur_pos=4): token အသစ် တစ်ခုတည်းကိုပဲ
+        ထည့်ပါတယ် (decode)။ အရင် token တွေရဲ့ အချက်အလက်ကို မော်ဒယ်ထဲက cache
+        မှာ သိမ်းထားပြီးသားမို့ ပြန်မတွက်ရပါဘူး။
+      - prev_pos ကို start_pos အဖြစ် ပေးတာက cache ထဲ ဘယ်နေရာမှာ ရေးရမလဲနဲ့
+        RoPE position ကို မော်ဒယ်က သိဖို့ပါ။
+      - မော်ဒယ်က နောက်ဆုံး position ရဲ့ logits ကိုပဲ ပြန်ပေးပါတယ်
+        (model.py:788 မှာ h[:, -1])။ Shape က (batch, vocab_size) ပါ။
+
+  62      if temperature > 0:
+  63          next_token = sample(logits, temperature)    # ကျပန်းရွေး
+  64      else:
+  65          next_token = logits.argmax(dim=-1)          # greedy: အမြင့်ဆုံးကိုပဲ အမြဲရွေး
+
+  66      next_token = torch.where(prompt_mask[:, cur_pos], tokens[:, cur_pos], next_token)
+      Prompt အရှည်မတူတာကို ကိုင်တွယ်တဲ့ လှည့်ကွက်ပါ။ cur_pos = 3 မှာ:
+      - row 0: prompt ပြီးပြီ (-1) ဆိုတော့ မော်ဒယ်ထုတ်တဲ့ token ကို သုံးပါတယ်။
+      - row 1: prompt ထဲမှာ b4 ရှိသေးတော့ မော်ဒယ်ရဲ့ ခန့်မှန်းချက်ကို
+        လွှင့်ပစ်ပြီး b4 ကိုပဲ ထားပါတယ်။
+      ဒါကြောင့် batch တစ်ခုလုံး တစ်ပြိုင်နက်တည်း ရွေ့လျားပေမယ့် prompt အရှည်ကို
+      ထိခိုက်မှု မရှိပါဘူး။
+
+  67      tokens[:, cur_pos] = next_token
+  68      finished |= torch.logical_and(~prompt_mask[:, cur_pos], next_token == eos_id)
+      Prompt နေရာ မဟုတ်ဘဲ (~prompt_mask) EOS (စာဆုံး) token ထွက်လာရင် အဲဒီ
+      sequence ကို "ပြီးပြီ" လို့ မှတ်ပါတယ်။ |= ဆိုတော့ တစ်ခါ ပြီးသွားရင်
+      အမြဲ ပြီးနေပါတယ်။
+
+  69      prev_pos = cur_pos
+  70      if finished.all():     # အားလုံးပြီးရင် စောစော ထွက်
+  71          break
+
+[ရလဒ် ထုတ်ယူခြင်း, Line 72-78]
+
+  73  for i, toks in enumerate(tokens.tolist()):
+  74      toks = toks[prompt_lens[i]:prompt_lens[i]+max_new_tokens]   # prompt ကိုဖယ်၊ အသစ်ကိုပဲယူ
+  75      if eos_id in toks:
+  76          toks = toks[:toks.index(eos_id)]                        # EOS နောက်က အရာအားလုံး ဖြတ်
+  77      completion_tokens.append(toks)
+
+  [မှတ်ချက်] Sequence တစ်ခု အရင်ပြီးပြီး တခြားတစ်ခု မပြီးသေးရင် loop က
+  ဆက်လည်နေလို့ ပြီးသွားတဲ့ sequence မှာ EOS နောက်က အမှိုက် token တွေ
+  ထပ်ထွက်ပါတယ်။ Line 76 က အဲဒါတွေကို ဖြတ်ထုတ်ပေးပါတယ်။
+
+၃.၃ main(): Setup နဲ့ Run (Line 81-158)
+--------------------------------------------------------------------------------
+[Distributed Setup, Line 100-111]
+
+671B မော်ဒယ်က GPU တစ်လုံးထဲ မဆံ့လို့ GPU ၁၆ လုံးပေါ် ခွဲတင်ပါတယ်။
+torchrun က process တစ်ခုစီကို environment variable တွေ ပေးပါတယ်:
+
+  100 world_size = int(os.getenv("WORLD_SIZE", "1"))   # GPU စုစုပေါင်း (ဥပမာ 16)
+  101 rank = int(os.getenv("RANK", "0"))               # ငါက ဘယ်နှစ်ခုမြောက် GPU လဲ (0-15)
+  102 local_rank = int(os.getenv("LOCAL_RANK", "0"))   # ဒီစက်ထဲမှာ ဘယ်နှစ်ခုမြောက်လဲ (0-7)
+  103 if world_size > 1:
+  104     dist.init_process_group("nccl")               # NVIDIA GPU ကြား ဆက်သွယ်ရေး စတင်
+
+  105 global print
+  106 if rank != 0:
+  107     print = lambda *_, **__: None
+      Process ၁၆ ခုလုံးက ဒီ code ကို run နေတာပါ။ အားလုံး print လုပ်ရင် အဖြေ
+      ၁၆ ခါ ထပ်ပေါ်မှာမို့ rank 0 ကလွဲရင် ကျန်တဲ့ process တွေရဲ့ print ကို
+      ဘာမှမလုပ်တဲ့ function နဲ့ အစားထိုးလိုက်ပါတယ်။
+
+  108 torch.cuda.set_device(local_rank)           # ကိုယ့် GPU ကို ရွေး
+  109 torch.set_default_dtype(torch.bfloat16)    # default ကို BF16 ထား
+  110 torch.set_num_threads(8)                   # CPU thread ကန့်သတ်
+  111 torch.manual_seed(965)                     # GPU အားလုံး ကျပန်းဂဏန်း တူအောင် (အရေးကြီး!)
+      Line 111 က အရေးကြီးပါတယ်။ GPU တိုင်းက sample() မှာ token တူတူကို
+      ရွေးရပါမယ်။ မဟုတ်ရင် GPU တွေကြား sequence တွေ ကွဲသွားပြီး မော်ဒယ်
+      ပျက်ပါလိမ့်မယ်။
+
+[မော်ဒယ် Load လုပ်ခြင်း, Line 112-119]
+
+  112 with open(config) as f:
+  113     args = ModelArgs(**json.load(f))      # configs/config_671B.json ကို ဖတ်
+  115 with torch.device("cuda"):
+  116     model = Transformer(args)             # GPU ပေါ်မှာ တိုက်ရိုက် ဆောက် (ကျပန်း weight)
+  117 tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
+
+  118 tokenizer.decode(generate(model, [tokenizer.encode("DeepSeek")], 2, -1, 1.)[0])
+      ဒီလိုင်းက ထူးဆန်းပါတယ်။ Weight မ load ရသေးခင် token ၂ ခု စမ်းထုတ်ပြီး
+      ရလဒ်ကို လွှင့်ပစ်ပါတယ် (eos_id=-1 ဆိုတော့ ဘယ်တော့မှ စောစော မရပ်ပါဘူး)။
+      ဒါက warm-up ပါ။ Triton kernel compile လုပ်ခြင်း၊ autotune (kernel.py ထဲက
+      config ၃၆ မျိုး စမ်းခြင်း)၊ CUDA initialization စတာတွေကို ကြိုလုပ်ထားဖို့ပါ။
+      ဒါမှ user ရဲ့ ပထမဆုံး မေးခွန်း နှေးမနေမှာပါ။
+
+  119 load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
+      GPU တစ်လုံးစီက ကိုယ့်အပိုင်းကိုပဲ load လုပ်ပါတယ်။ ဥပမာ rank 3 က
+      model3-mp16.safetensors ကို load လုပ်ပါတယ်။ ဒီဖိုင်တွေကို convert.py က
+      ခွဲထုတ်ပေးထားတာပါ။
+
+[Interactive Mode, Line 121-144]
+
+  122 messages = []                          # စကားပြောမှတ်တမ်း
+  123 while True:
+  124     if world_size == 1:
+  125         prompt = input(">>> ")             # GPU တစ်လုံးတည်း: ရိုးရိုး input
+  126     elif rank == 0:
+  127         prompt = input(">>> ")             # rank 0 က keyboard ကနေ ဖတ်ပြီး
+  128         objects = [prompt]
+  129         dist.broadcast_object_list(objects, 0)   # GPU အားလုံးဆီ ပို့
+  130     else:
+  131         objects = [None]
+  132         dist.broadcast_object_list(objects, 0)   # rank 0 ဆီက လက်ခံ
+  133         prompt = objects[0]
+      Keyboard က rank 0 မှာပဲ ရှိပါတယ်။ ဒါကြောင့် rank 0 က ရိုက်ထည့်တဲ့ စာကို
+      broadcast လုပ်ပြီး ကျန်တဲ့ GPU ၁၅ လုံးကို ပို့ပေးပါတယ်။ အားလုံး prompt
+      တူတူ ရမှ တွက်ချက်မှုကို ပူးပေါင်းလုပ်နိုင်ပါတယ်။
+
+  134 if prompt == "/exit":        # ထွက်
+  135     break
+  136 elif prompt == "/clear":     # စကားပြောမှတ်တမ်း ရှင်း
+  137     messages.clear()
+  138     continue
+
+  139 messages.append({"role": "user", "content": prompt})
+  140 prompt_tokens = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+      Chat template က messages list ကို မော်ဒယ် training လုပ်ခဲ့တဲ့ format
+      အတိုင်း token အဖြစ် ပြောင်းပါတယ်။ ဥပမာ ရိုးရှင်းစွာ ပြောရရင်:
+        <｜begin▁of▁sentence｜><｜User｜>မင်္ဂလာပါ<｜Assistant｜>
+      add_generation_prompt=True က အဆုံးမှာ "Assistant ဖြေရမယ့်အလှည့်" ဆိုတဲ့
+      marker ထည့်ပေးပါတယ်။
+
+  141 completion_tokens = generate(model, [prompt_tokens], max_new_tokens, tokenizer.eos_token_id, temperature)
+  142 completion = tokenizer.decode(completion_tokens[0], skip_special_tokens=True)   # token → စာသား
+  143 print(completion)
+  144 messages.append({"role": "assistant", "content": completion})   # မှတ်တမ်းထဲ ထည့်
+      Line 144 ကြောင့် multi-turn conversation ဖြစ်ပါတယ်။ နောက်မေးခွန်းမှာ
+      အရင်စကားဝိုင်း တစ်ခုလုံး ပါသွားပါတယ်။
+
+  [သတိပြုစရာ ၂ ခု]
+  - မေးလေလေ messages ရှည်လေလေ ဖြစ်ပြီး ဘယ်တော့မှ အလိုလို မဖြတ်ပါဘူး။ ၁၆K
+    token ကျော်ရင် line 52 ရဲ့ assert က crash ဖြစ်ပါမယ်။ /clear နဲ့ ရှင်းရပါမယ်။
+  - အဖြေက max_new_tokens (default 200) မှာ ဖြတ်ခံရရင် ဖြတ်ထားတဲ့ အဖြေအတိုင်း
+    မှတ်တမ်းထဲ ဝင်သွားပါတယ်။
+
+[Batch Mode, Line 145-155]
+
+  146 with open(input_file) as f:
+  147     prompts = [line.strip() for line in f.readlines()]      # တစ်ကြောင်း = မေးခွန်းတစ်ခု
+  148 assert len(prompts) <= args.max_batch_size                 # default 8 ခုထက် မပိုရ
+  149 prompt_tokens = [tokenizer.apply_chat_template([{"role": "user", "content": prompt}], ...) for prompt in prompts]
+  150 completion_tokens = generate(model, prompt_tokens, ...)    # တစ်ပြိုင်နက် ထုတ်
+  151 completions = tokenizer.batch_decode(completion_tokens, skip_special_tokens=True)
+      မေးခွန်းတစ်ခုစီက သီးသန့်စကားဝိုင်း (single-turn) ဖြစ်ပါတယ်။ Batch size က
+      KV cache အရွယ်အစားကြောင့် ၈ ခုအထိပဲ ရပါတယ်။
+
+  157 if world_size > 1:
+  158     dist.destroy_process_group()     # GPU ဆက်သွယ်ရေး ပိတ်
+
+၃.၄ Command-line Arguments (Line 161-185)
+--------------------------------------------------------------------------------
+  --ckpt-path       # convert.py ထုတ်ထားတဲ့ weight folder (မဖြစ်မနေ လို)
+  --config          # configs/config_671B.json စသည် (မဖြစ်မနေ လို)
+  --input-file      # batch mode အတွက် prompt ဖိုင်
+  --interactive     # chat mode ဖွင့်
+  --max-new-tokens  # default 200
+  --temperature     # default 0.2 (တည်ငြိမ်တဲ့ အဖြေ)
+  assert args.input_file or args.interactive   # mode တစ်ခုခု ရွေးရမယ်
+
+  [မှတ်ချက်] main() ရဲ့ default (line 86-87) က 100 / 1.0 ဖြစ်ပေမယ့် command
+  line ကနေ run ရင် argparse ရဲ့ default 200 / 0.2 ကို သုံးပါတယ်။
+
+၃.၅ Flow တစ်ခုလုံး အကျဉ်း
+--------------------------------------------------------------------------------
+  torchrun (GPU 16 လုံး၊ process 16 ခု)
+     │
+     ▼
+  main(): GPU setup → Transformer ဆောက် → warm-up → weight အပိုင်းလိုက် load
+     │
+     ▼
+  User: "မင်္ဂလာပါ"  (rank 0) ──broadcast──▶ rank 1..15
+     │
+     ▼
+  apply_chat_template → [token IDs]
+     │
+     ▼
+  generate():
+     ├─ prefill: prompt တစ်ခုလုံး → model.forward → logits
+     └─ loop:   sample() → token အသစ် → model.forward(token 1 ခု) → ... → EOS
+     │
+     ▼
+  tokenizer.decode → စာသား → print (rank 0 မှာပဲ)
+
+
+################################################################################
+  အပိုင်း ၄။ MoE (Mixture-of-Experts) : Expert ရွေးပုံ
+################################################################################
+
+၄.၀ ခြုံငုံသုံးသပ်ချက်
+--------------------------------------------------------------------------------
+ဆေးရုံဥပမာနဲ့ ပြန်စဉ်းစားကြည့်ပါ:
+  - Expert ၂၅၆ ယောက်     = အထူးကု ဆရာဝန်များ
+  - Gate                 = လူနာကို ဘယ်ဆရာဝန်ဆီ လွှဲရမလဲ ဆုံးဖြတ်တဲ့ ဧည့်ကြိုကောင်တာ
+  - Shared Expert ၁ ယောက် = လူနာတိုင်းကို ကြည့်တဲ့ အထွေထွေ ဆရာဝန်
+
+Token တစ်ခုချင်းစီက ကိုယ်ပိုင် expert ၈ ယောက် ကို ရွေးခံရပါတယ်။ ဒါကြောင့်
+စာကြောင်းတစ်ကြောင်းထဲက token အသီးသီးက expert မတူတာတွေဆီ ရောက်နိုင်ပါတယ်။
+
+Code ၄ ပိုင်း:
+  Block   (model.py:713)  : Layer ဘယ်ဟာ MoE သုံးမလဲ ဆုံးဖြတ်
+  Gate    (model.py:532)  : Expert ရွေးခြင်း (အဓိက)
+  Expert  (model.py:598)  : Expert တစ်ယောက်ရဲ့ တွက်ချက်မှု
+  MoE     (model.py:633)  : အားလုံးကို ပေါင်းစပ် run
+
+၄.၁ MoE ကို ဘယ် layer တွေမှာ သုံးလဲ (model.py:713)
+--------------------------------------------------------------------------------
+  self.ffn = MLP(args.dim, args.inter_dim) if layer_id < args.n_dense_layers else MoE(args)
+
+n_dense_layers = 3 ဖြစ်ပါတယ်။
+  - Layer 0, 1, 2 မှာ ပုံမှန် MLP (dense) ကို သုံးပါတယ်။ အစောပိုင်း layer တွေက
+    အခြေခံ pattern တွေ သင်ယူလို့ expert ခွဲဖို့ သိပ်မလိုပါဘူး။
+  - Layer 3 မှ 60 (၅၈ layer) မှာ MoE ကို သုံးပါတယ်။
+
+Block ထဲမှာ MoE ကို ဒီလို ခေါ်ပါတယ်:
+  x = x + self.attn(self.attn_norm(x), ...)   # attention
+  x = x + self.ffn(self.ffn_norm(x))          # ← MoE (ဒါမှမဟုတ် MLP)
+
+၄.၂ Gate: Expert ရွေးခြင်း
+--------------------------------------------------------------------------------
+[__init__, Line 550-561]
+
+  self.topk = args.n_activated_experts       # 8   (token တစ်ခုလျှင် expert ၈ ယောက်)
+  self.n_groups = args.n_expert_groups       # 8   (expert ၂၅၆ ကို အုပ်စု ၈ စု ခွဲ)
+  self.topk_groups = args.n_limited_groups   # 4   (အုပ်စု ၄ စုထဲကပဲ ရွေးခွင့်)
+  self.score_func = args.score_func          # "sigmoid"
+  self.route_scale = args.route_scale        # 2.5
+  self.weight = nn.Parameter(torch.empty(256, 7168))   # expert တစ်ယောက်စီအတွက် "ကိုယ်ပိုင်ပုံစံ" vector
+  self.bias = nn.Parameter(torch.empty(256)) if self.dim == 7168 else None
+
+  - weight ရဲ့ row တစ်ခုစီက expert တစ်ယောက်ရဲ့ "ဘယ်လို token မျိုးကို
+    ကျွမ်းကျင်လဲ" ကို ကိုယ်စားပြုတဲ့ vector ပါ။
+  - bias က 671B မော်ဒယ် (dim=7168) မှာပဲ ပါပါတယ်။ 16B/236B (V2 မျိုးဆက်) မှာ
+    မပါပါဘူး။ Config တစ်ခုခုကို မစစ်ဘဲ dim ကို ကြည့်ပြီး ခွဲခြားတာက hack
+    ဆန်ပါတယ်။
+
+[forward, အဆင့် ၁: ရမှတ်တွက်ခြင်း, Line 573-577]
+
+  573  scores = linear(x, self.weight)      # (tokens, 7168) x (7168, 256) → (tokens, 256)
+  574  if self.score_func == "softmax":
+  575      scores = scores.softmax(dim=-1, dtype=torch.float32)
+  576  else:
+  577      scores = scores.sigmoid()         # V3: 0 နဲ့ 1 ကြား ရမှတ်
+
+  Token vector x နဲ့ expert vector တစ်ခုစီကို dot product တွက်ပါတယ်။ ဆင်တူလေ
+  ရမှတ်မြင့်လေပါပဲ။
+
+  Sigmoid vs Softmax: V2 က softmax သုံးခဲ့ပါတယ်။ Softmax မှာ expert တစ်ယောက်
+  ရမှတ်တက်ရင် တခြားသူတွေ ရမှတ်ကျပါတယ် (ပေါင်းလဒ် = 1 ဖြစ်ရလို့)။ V3 က
+  sigmoid သုံးတော့ expert တစ်ယောက်ချင်းစီကို လွတ်လပ်စွာ အမှတ်ပေးပါတယ်။
+
+[အဆင့် ၂: Bias ထည့်ခြင်း, Load Balancing, Line 578-580]
+
+  578  original_scores = scores             # မူလရမှတ်ကို သိမ်းထား
+  579  if self.bias is not None:
+  580      scores = scores + self.bias      # ရွေးဖို့အတွက်ပဲ bias ပေါင်း
+
+  DeepSeek-V3 ရဲ့ ဆန်းသစ်တီထွင်မှု တစ်ခုပါ (Auxiliary-loss-free load balancing)။
+
+  ပြဿနာ: Expert အချို့က လူကြိုက်များပြီး token အများကြီး ရနေပြီး တချို့က
+  ဘာမှမရဘဲ အလကား ဖြစ်နေနိုင်ပါတယ်။ ဒါဆိုရင် GPU အချို့ အလုပ်များပြီး တချို့
+  အားနေပါလိမ့်မယ်။
+
+  ယခင်နည်း: Training loss ထဲမှာ "load မညီရင် ဒဏ်ပေး" ဆိုတဲ့ auxiliary loss
+  ထည့်ကြပါတယ်။ ဒါပေမယ့် ဒါက မော်ဒယ်ရဲ့ တကယ့်အရည်အသွေးကို ထိခိုက်ပါတယ်။
+
+  V3 နည်း: Training အတွင်းမှာ:
+    - Token များလွန်းနေတဲ့ expert ရဲ့ bias ကို လျှော့ လိုက်ပါတယ်
+      (ရွေးခံရဖို့ ခက်လာအောင်)။
+    - Token နည်းနေတဲ့ expert ရဲ့ bias ကို တိုး လိုက်ပါတယ်။
+
+  အရေးကြီးချက်: Bias ကို "ဘယ်သူ့ရွေးမလဲ" ဆိုတာမှာပဲ သုံးပါတယ်။ "ဘယ်လောက်
+  အလေးပေးမလဲ" (weight) ကိုတော့ original_scores (bias မပါ) ကနေ ယူပါတယ်
+  (အဆင့် ၅ မှာ မြင်ရပါမယ်)။ ဒါကြောင့် load balancing က output တန်ဖိုးကို
+  တိုက်ရိုက် မပြောင်းလဲစေပါဘူး။
+
+  Inference မှာတော့ bias က training ကနေ ရလာတဲ့ ကိန်းသေ တန်ဖိုးတွေပါ။
+
+[အဆင့် ၃: အုပ်စုရွေးခြင်း, Group-limited Routing, Line 581-589]
+
+  581  if self.n_groups > 1:
+  582      scores = scores.view(x.size(0), self.n_groups, -1)    # (tokens, 8 groups, 32 experts)
+
+  Expert ၂၅၆ ယောက်ကို တစ်စုလျှင် ၃၂ ယောက်ပါတဲ့ အုပ်စု ၈ စု အဖြစ် ခွဲပါတယ်:
+    Group 0: expert   0-31
+    Group 1: expert  32-63
+    ...
+    Group 7: expert 224-255
+
+  583      if self.bias is None:
+  584          group_scores = scores.amax(dim=-1)                   # V2: အုပ်စုထဲ အမြင့်ဆုံး ၁ ခု
+  585      else:
+  586          group_scores = scores.topk(2, dim=-1)[0].sum(dim=-1) # V3: အုပ်စုထဲ အမြင့်ဆုံး ၂ ခု ပေါင်း
+  အုပ်စုတစ်စုစီကို ရမှတ်ပေးပါတယ်။ V3 မှာ အကောင်းဆုံး expert ၂ ယောက်ရဲ့
+  ရမှတ်ပေါင်းကို သုံးပါတယ်။ Expert တစ်ယောက်တည်း ကောင်းနေတဲ့ အုပ်စုထက် အကောင်း
+  ၂ ယောက်ရှိတဲ့ အုပ်စုကို ပိုနှစ်သက်ပါတယ်။
+
+  587      indices = group_scores.topk(self.topk_groups, dim=-1)[1]            # အကောင်းဆုံး အုပ်စု ၄ စု
+  588      mask = torch.zeros_like(scores[..., 0]).scatter_(1, indices, True)  # ရွေးခံရ = 1, ကျန် = 0
+  589      scores = (scores * mask.unsqueeze(-1)).flatten(1)                   # မရွေးခံရတဲ့ အုပ်စု → 0
+  ရွေးမခံရတဲ့ အုပ်စု ၄ စု (expert ၁၂၈ ယောက်) ရဲ့ ရမှတ်ကို 0 လုပ်ပြီး
+  (tokens, 256) ပြန်ပြားပါတယ်။
+
+  ဘာကြောင့် အုပ်စုကန့်သတ်တာလဲ? Training အတွင်းမှာ expert အုပ်စုတွေကို
+  ကွန်ပျူတာ (node) မတူတာတွေပေါ် ဖြန့်ထားပါတယ်။ Token တစ်ခုက node ၄ ခုထက်
+  ပိုမသွားရအောင် ကန့်သတ်လိုက်တော့ node ကြား network ဆက်သွယ်ရေး အများကြီး
+  လျော့သွားပါတယ်။
+
+  [သိမ်မွေ့တဲ့ အချက်] Masking ကို 0 နဲ့ လုပ်ထားပါတယ်။ Bias က အနုတ်တန်ဖိုး
+  ဖြစ်နိုင်လို့ sigmoid + bias < 0 ဖြစ်တဲ့ expert တွေ ရွေးထားတဲ့ အုပ်စုထဲမှာ
+  ရှိနေရင် mask ခံထားရတဲ့ (0) expert က သူ့ထက် ရမှတ်ပိုမြင့်ပြီး မှားရွေးခံရ
+  နိုင်ပါတယ်။ -inf နဲ့ mask လုပ်တာက ပိုစိတ်ချရပါတယ်။
+
+[အဆင့် ၄: Expert ၈ ယောက် ရွေးခြင်း, Line 590]
+
+  590  indices = torch.topk(scores, self.topk, dim=-1)[1]    # (tokens, 8)
+  ကျန်တဲ့ expert ၁၂၈ ယောက်ထဲက ရမှတ် (bias ပါပြီး) အမြင့်ဆုံး ၈ ယောက်ရဲ့
+  နံပါတ်ကို ယူပါတယ်။
+
+[အဆင့် ၅: အလေးချိန် တွက်ခြင်း, Line 591-595]
+
+  591  weights = original_scores.gather(1, indices)          # bias မပါတဲ့ မူလရမှတ်
+  592  if self.score_func == "sigmoid":
+  593      weights /= weights.sum(dim=-1, keepdim=True)      # ပေါင်းလဒ် = 1 ဖြစ်အောင်
+  594  weights *= self.route_scale                           # x 2.5
+  595  return weights.type_as(x), indices
+  - Line 591: ရွေးထားတဲ့ ၈ ယောက်ရဲ့ မူလ sigmoid ရမှတ်ကို ထုတ်ယူပါတယ်။
+  - Line 593: Sigmoid က ပေါင်းလဒ် 1 မဖြစ်လို့ normalize လုပ်ပါတယ်။
+  - Line 594: 2.5 နဲ့ မြှောက်တာက routed expert တွေရဲ့ output ကို shared
+    expert ထက် ပိုအလေးပေးဖို့ပါ (training မှာ ညှိထားတဲ့ hyperparameter)။
+
+၄.၃ ဥပမာ တွက်ပြချက် (ရိုးရှင်းအောင် လျှော့ထားပါတယ်)
+--------------------------------------------------------------------------------
+Expert ၈ ယောက်၊ အုပ်စု ၄ စု (၂ ယောက်စီ)၊ အုပ်စု ၂ စု ရွေး၊ expert ၂ ယောက်
+ရွေးမယ်ဆိုပါစို့:
+
+  Expert:          E0    E1  | E2    E3  | E4    E5  | E6    E7
+  sigmoid:        0.9   0.2  | 0.6   0.5 | 0.3   0.1 | 0.7   0.8
+  bias:          -0.3   0.0  | 0.1   0.1 | 0.0   0.0 | 0.0  -0.1
+  scores+bias:    0.6   0.2  | 0.7   0.6 | 0.3   0.1 | 0.7   0.7
+                   Group 0      Group 1     Group 2     Group 3
+  group score:     0.8          1.3         0.4         1.4     (top-2 ပေါင်း)
+
+  → ရွေးခံရတဲ့ အုပ်စု: Group 3 (1.4), Group 1 (1.3)
+  → masked:       0     0    | 0.7   0.6 | 0     0   | 0.7   0.7
+  → top-2:        E2 (0.7), E6 (0.7)   [E7 လည်း 0.7 ဖြစ်လို့ tie]
+  → weights (original): E2=0.6, E6=0.7
+  → normalize:   E2=0.46, E6=0.54
+  → x 2.5:       E2=1.15, E6=1.35
+
+သတိထားကြည့်ပါ: E0 က မူလရမှတ် အမြင့်ဆုံး (0.9) ဖြစ်ပေမယ့် bias -0.3
+(training မှာ လူကြိုက်များလွန်းခဲ့လို့) ကြောင့် မရွေးခံရပါဘူး။ ဒါ load
+balancing အလုပ်လုပ်နေတာပါ။
+
+၄.၄ Expert: Expert တစ်ယောက်ရဲ့ တွက်ချက်မှု (Line 598-631)
+--------------------------------------------------------------------------------
+  self.w1 = Linear(dim, inter_dim)     # 7168 → 2048
+  self.w2 = Linear(inter_dim, dim)     # 2048 → 7168
+  self.w3 = Linear(dim, inter_dim)     # 7168 → 2048
+
+  def forward(self, x):
+      return self.w2(F.silu(self.w1(x)) * self.w3(x))
+
+ဒါကို SwiGLU လို့ ခေါ်ပါတယ်:
+  - w1(x) ကို SiLU activation နဲ့ ဖြတ်ပြီး "gate" အဖြစ် သုံးပါတယ်
+    (ဘယ် feature ကို ဖွင့်/ပိတ်မလဲ)။
+  - w3(x) က "value" ပါ။
+  - နှစ်ခု element-wise မြှောက်ပြီး w2 နဲ့ မူလ dimension ကို ပြန်ပို့ပါတယ်။
+
+Expert တစ်ယောက်ရဲ့ parameter = 3 x 7168 x 2048 ≈ 44M ပါ။ Layer တစ်ခုမှာ
+expert ၂၅၆ ယောက် ≈ 11.3B ရှိပေမယ့် token တစ်ခုက ၉ ယောက် (၈ + shared ၁)
+≈ 0.4B ကိုပဲ သုံးပါတယ်။ ဒါကြောင့် 671B ထဲက 37B ပဲ active ဖြစ်တာပါ။
+
+[မှတ်ချက်] Expert က ရိုးရိုး Linear ကို သုံးပြီး MLP က ColumnParallelLinear /
+RowParallelLinear ကို သုံးပါတယ်။ ကွာခြားချက်ကို အောက်မှာ ရှင်းပါမယ်။
+
+၄.၅ MoE: အားလုံးပေါင်းစပ်ခြင်း (Line 633-690)
+--------------------------------------------------------------------------------
+[__init__: Expert တွေကို GPU တွေပေါ် ခွဲဝေခြင်း, Line 651-663]
+
+  assert args.n_routed_experts % world_size == 0
+  self.n_local_experts = args.n_routed_experts // world_size                 # 256 / 16 = 16
+  self.experts_start_idx = rank * self.n_local_experts                       # rank 3 → 48
+  self.experts_end_idx = self.experts_start_idx + self.n_local_experts       # → 64
+
+Expert Parallelism: GPU ၁၆ လုံးဆိုရင် GPU တစ်လုံးစီက expert ၁၆ ယောက်စီကို
+တာဝန်ယူပါတယ်:
+  GPU 0:  expert   0-15
+  GPU 1:  expert  16-31
+  ...
+  GPU 15: expert 240-255
+
+  662  self.experts = nn.ModuleList([Expert(...) if start <= i < end else None
+                                    for i in range(256)])
+  List မှာ နေရာ ၂၅၆ ခု ရှိပေမယ့် ကိုယ့် GPU ပိုင် ၁၆ ခုမှာပဲ Expert အစစ်
+  ရှိပြီး ကျန်တာက None ပါ။ Index နံပါတ်တွေ global နံပါတ်အတိုင်း
+  ကိုက်ညီနေအောင် ဒီလို လုပ်ထားတာပါ။
+
+  self.shared_experts = MLP(args.dim, args.n_shared_experts * args.moe_inter_dim)   # 7168 → 2048 → 7168
+  Shared expert ကတော့ MLP (tensor parallel) ကို သုံးလို့ GPU ၁၆ လုံးလုံးပေါ်
+  အပိုင်းလိုက် ခွဲထားပါတယ်။
+
+[forward, Line 665-690]
+
+  676  shape = x.size()                     # (batch, seq, 7168) ကို မှတ်ထား
+  677  x = x.view(-1, self.dim)             # (batch x seq, 7168): token တွေကို တန်းစီ
+  678  weights, indices = self.gate(x)      # weights: (T, 8), indices: (T, 8)
+  679  y = torch.zeros_like(x)              # output ကို 0 နဲ့ စ
+  မှတ်ချက်: Gate ကို GPU တိုင်းမှာ တူတူ run ပါတယ် (input တူ၊ gate weight တူ)။
+  ဒါကြောင့် GPU အားလုံးက "ဘယ် token ဘယ် expert ဆီ သွားမလဲ" ကို တူညီစွာ သိပါတယ်။
+
+  680  counts = torch.bincount(indices.flatten(), minlength=self.n_routed_experts).tolist()
+  Expert တစ်ယောက်စီ token ဘယ်နှစ်ခု ရလဲ ရေတွက်ပါတယ်။ ဥပမာ counts[48] = 5
+  ဆိုရင် expert 48 က token ၅ ခု ရပါတယ်။
+
+  681  for i in range(self.experts_start_idx, self.experts_end_idx):   # ကိုယ့် expert ၁၆ ယောက်ပဲ
+  682      if counts[i] == 0:
+  683          continue                                  # token မရရင် ကျော် (တွက်စရာမလို)
+  684      expert = self.experts[i]
+  685      idx, top = torch.where(indices == i)
+  686      y[idx] += expert(x[idx]) * weights[idx, top, None]
+
+  Line 685 က အရေးကြီးပါတယ်။ indices == i က (T, 8) boolean ဇယား ဖြစ်ပါတယ်။
+  torch.where က True နေရာတွေရဲ့:
+    - idx = token နံပါတ် (ဘယ် token တွေက ဒီ expert ကို ရွေးလဲ)
+    - top = slot နံပါတ် (၈ နေရာထဲက ဘယ်နေရာမှာ ရွေးခဲ့လဲ, 0-7)
+
+  ဥပမာ:
+    indices = [[ 3, 48, 99, ...],    # token 0
+               [48, 12,  7, ...],    # token 1
+               [ 5,  6,  8, ...]]    # token 2
+    i = 48  →  idx = [0, 1],  top = [1, 0]
+
+  Line 686:
+    - x[idx]: expert 48 ကို ရွေးထားတဲ့ token တွေကိုပဲ စုပြီး batch တစ်ခုတည်း
+      အဖြစ် တွက်ပါတယ် (ထိရောက်မှုအတွက်)။
+    - weights[idx, top, None]: token တစ်ခုစီက expert 48 ကို ပေးထားတဲ့
+      အလေးချိန်ပါ။ Shape (n, 1) ဖြစ်အောင် None ထည့်ပြီး broadcast လုပ်ပါတယ်။
+    - y[idx] +=: ရလဒ်ကို token ရဲ့ output ထဲ ပေါင်းထည့်ပါတယ်။
+
+  687  z = self.shared_experts(x)           # token အားလုံး shared expert ကို ဖြတ်
+  688  if world_size > 1:
+  689      dist.all_reduce(y)               # GPU ၁၆ လုံးရဲ့ y ကို ပေါင်း
+  690  return (y + z).view(shape)           # မူလ shape ပြန်
+
+  Line 689 all_reduce ရဲ့ အဓိပ္ပာယ်: Token တစ်ခုရဲ့ expert ၈ ယောက်က GPU
+  မတူတာတွေမှာ ရှိနေနိုင်ပါတယ်။ GPU တစ်လုံးစီက ကိုယ့် expert တွေရဲ့ အပိုင်းကိုပဲ
+  y ထဲ ထည့်ထားပါတယ် (ကျန်တာ 0)။ all_reduce က GPU အားလုံးရဲ့ y ကို
+  ပေါင်းလိုက်တော့ token တိုင်းမှာ expert ၈ ယောက်လုံးရဲ့ ရလဒ် စုံသွားပါတယ်:
+
+    GPU 0 ရဲ့ y[tok]:  E3 ရလဒ်          (တခြား 0)
+    GPU 3 ရဲ့ y[tok]:  E48 ရလဒ်
+    GPU 6 ရဲ့ y[tok]:  E99 ရလဒ်
+    ...
+    all_reduce →  y[tok] = E3 + E48 + E99 + ... (၈ ခုလုံး)
+
+  Shared expert (z) ကတော့ RowParallelLinear (model.py:261) ထဲမှာ ကိုယ်ပိုင်
+  all_reduce ရှိပြီးသားမို့ ဒီမှာ ထပ် reduce မလုပ်ပါဘူး။
+
+၄.၆ Flow တစ်ခုလုံး အကျဉ်း
+--------------------------------------------------------------------------------
+  token x (7168)
+     │
+     ├────────────────────────────────────────────┐
+     ▼                                            ▼
+  Gate:                                     Shared Expert (MLP)
+   ① sigmoid(x · Wᵀ)       → 256 ရမှတ်              │
+   ② + bias                 (ရွေးဖို့သက်သက်)        │
+   ③ 8 group → top-4 group                          │
+   ④ top-8 expert                                    │
+   ⑤ weight = original score, normalize, x2.5        │
+     │                                               │
+     ▼                                               │
+  Expert 8 ယောက် (GPU အသီးသီးမှာ)                    │
+   Σ weightᵢ x Expertᵢ(x)                            │
+     │                                               │
+     ▼                                               │
+  all_reduce (GPU ကြား ပေါင်း)                      │
+     │                                               │
+     └──────────────────► y + z ◄────────────────────┘
+                            │
+                            ▼
+                     output (7168)
+
+၄.၇ အဓိက မှတ်သားစရာ ၅ ချက်
+--------------------------------------------------------------------------------
+  1. Token တစ်ခုချင်းစီက ကိုယ်ပိုင် expert ၈ ယောက် ရွေးပါတယ်။
+  2. Bias က "ဘယ်သူ့ရွေး" ကိုပဲ သက်ရောက်ပြီး "ဘယ်လောက်အလေးပေး" ကို
+     မသက်ရောက်ပါဘူး (aux-loss-free load balancing)။
+  3. Group limit (8 ထဲက 4) က network ဆက်သွယ်ရေး လျှော့ဖို့ပါ။
+  4. Shared expert က token တိုင်း သုံးတဲ့ အထွေထွေ ဗဟုသုတ ပါ။
+  5. Routed expert တွေကို GPU တွေပေါ် ခွဲတင် (expert parallel) ပြီး shared
+     expert ကို အပိုင်းလိုက် ပိုင်း (tensor parallel) ပါတယ်။
+
+
+################################################################################
+  အပိုင်း ၅။ MLA (Multi-head Latent Attention) နဲ့ KV Cache ချုံ့ပုံ
+################################################################################
+
+Code: inference/model.py:393-494
+
+၅.၀ နောက်ခံ: ပြဿနာက ဘာလဲ
+--------------------------------------------------------------------------------
+Attention ကို အတိုချုပ်ပြန်ကြည့်ရင် token အသစ်တစ်ခု ထုတ်တဲ့အခါ ရှေ့က token
+အားလုံးကို "ပြန်ကြည့်" ရပါတယ်:
+  - Q (Query) : "ငါ ဘာရှာနေလဲ" (token အသစ်ဆီက)
+  - K (Key)   : "ငါ့မှာ ဘာရှိလဲ" (ရှေ့က token တစ်ခုစီဆီက)
+  - V (Value) : "ငါ့ရဲ့ တကယ့်အကြောင်းအရာ" (ရှေ့က token တစ်ခုစီဆီက)
+
+    score = Q · K   →  softmax  →  V တွေကို အလေးချိန်နဲ့ ပေါင်း
+
+KV Cache: generate.py မှာ ပြောခဲ့သလို decode အဆင့်မှာ token အသစ် တစ်ခုတည်း
+ကိုပဲ ထည့်ပါတယ်။ ရှေ့က token တွေရဲ့ K, V ကို ပြန်မတွက်ရအောင် cache ထဲ
+သိမ်းထားပါတယ်။
+
+ပြဿနာ: Cache က ကြီးလွန်းတယ်။ ပုံမှန် Multi-Head Attention (MHA) ကို 671B
+မော်ဒယ်မှာ သုံးရင် token တစ်ခု၊ layer တစ်ခုအတွက်:
+    heads 128 x (K 192 + V 128) = 40,960 ဂဏန်း
+    x layer 61 x BF16 2 bytes ≈ 5 MB / token
+Token 16K ဆို ≈ 80 GB၊ batch 8 ဆို ≈ 640 GB ပါ။ ဒါက cache တစ်ခုတည်းအတွက်ပဲ
+ရှိပါသေးတယ်။
+
+MLA ရဲ့ အဖြေ: K နဲ့ V ကို သိမ်းမယ့်အစား ချုံ့ထားတဲ့ latent vector
+(512 + 64 = 576 ဂဏန်း) ကိုပဲ သိမ်းပါတယ်:
+    40,960 → 576   ≈ 71 ဆ သေးသွား
+ZIP ဖိုင်လို ချုံ့ထားပြီး လိုမှ ပြန်ဖြည်တာနဲ့ တူပါတယ်။ ဒါပေမယ့် MLA က
+ဖြည်တောင် မဖြည်ရဘဲ တွက်နိုင်တဲ့ လှည့်ကွက် ရှိပါတယ် (၅.၄)။
+
+၅.၁ Dimension များ (671B config)
+--------------------------------------------------------------------------------
+  dim               = 7168  : Token vector အရွယ်
+  n_heads           = 128   : Attention head (GPU 16 လုံးဆို တစ်လုံးလျှင် 8)
+  q_lora_rank       = 1536  : Q ကို ချုံ့တဲ့ အရွယ်
+  kv_lora_rank      = 512   : KV ကို ချုံ့တဲ့ အရွယ် (cache ထဲ သိမ်းတာ)
+  qk_nope_head_dim  = 128   : Q/K ရဲ့ "အကြောင်းအရာ" အပိုင်း (No Position Embedding)
+  qk_rope_head_dim  = 64    : Q/K ရဲ့ "နေရာ (position)" အပိုင်း (RoPE)
+  v_head_dim        = 128   : V အရွယ်
+
+Q/K head တစ်ခု = 128 (nope) + 64 (rope) = 192 ဖြစ်ပါတယ်။
+
+၅.၂ __init__: Weight များ (Line 409-441)
+--------------------------------------------------------------------------------
+  421  if self.q_lora_rank == 0:
+  422      self.wq = ColumnParallelLinear(self.dim, self.n_heads * self.qk_head_dim)   # 16B: တိုက်ရိုက်
+  423  else:
+  424      self.wq_a = Linear(self.dim, self.q_lora_rank)                  # 7168 → 1536  (ချုံ့)
+  425      self.q_norm = RMSNorm(self.q_lora_rank)
+  426      self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.qk_head_dim)  # 1536 → 128x192 (ချဲ့)
+  Q ကိုလည်း ချုံ့ထားပါတယ် (low-rank: ချုံ့ပြီးမှ ပြန်ချဲ့)။ Q ကို cache
+  မလုပ်လို့ cache အတွက် အကျိုးမရှိပေမယ့် parameter နဲ့ training memory
+  သက်သာပါတယ်။ 16B မော်ဒယ်မှာတော့ q_lora_rank=0 ဆိုတော့ မချုံ့ပါဘူး။
+
+  427  self.wkv_a = Linear(self.dim, self.kv_lora_rank + self.qk_rope_head_dim)   # 7168 → 512 + 64
+  428  self.kv_norm = RMSNorm(self.kv_lora_rank)
+  429  self.wkv_b = ColumnParallelLinear(self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim))
+                                                                               # 512 → 128 x (128 + 128)
+  430  self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim)   # 128x128 → 7168
+  - wkv_a (Down-projection): token ကို latent c (512) နဲ့ position key
+    k_pe (64) အဖြစ် ချုံ့ပါတယ်။ Cache ထဲ သိမ်းတာ ဒီ ၂ ခုပါ။
+  - wkv_b (Up-projection): latent 512 ကနေ head တစ်ခုစီရဲ့ k_nope (128) နဲ့
+    v (128) ကို ပြန်ချဲ့ပါတယ်။ Weight ထဲမှာ matrix ၂ ခု ပေါင်းထားပါတယ်:
+      W_UK (Key ချဲ့ဖို့)
+      W_UV (Value ချဲ့ဖို့)
+
+[Softmax Scale, Line 431-434]
+
+  431  self.softmax_scale = self.qk_head_dim ** -0.5          # 1/√192
+  432  if args.max_seq_len > args.original_seq_len:          # 16K > 4K
+  433      mscale = 0.1 * args.mscale * math.log(args.rope_factor) + 1.0    # 0.1 x ln(40) + 1 ≈ 1.37
+  434      self.softmax_scale = self.softmax_scale * mscale * mscale        # x 1.87
+  - 1/√d က ပုံမှန် attention scaling ပါ။
+  - YaRN ဆိုတာ မော်ဒယ်ကို 4K နဲ့ training လုပ်ပြီး context ကို ပိုရှည်အောင်
+    (128K အထိ) ချဲ့တဲ့ နည်းပါ။ Context ချဲ့တဲ့အခါ attention က "ပျံ့နှံ့
+    (blurry)" သွားတတ်လို့ scale ကို နည်းနည်း တိုးပြီး ပြန် "စူးရှ (sharp)"
+    အောင် လုပ်ပါတယ်။
+
+[Cache Buffers, Line 436-441]
+
+  436  if attn_impl == "naive":
+  437      k_cache: (batch, seq, heads, 192)      # ← ချုံ့မထား
+  438      v_cache: (batch, seq, heads, 128)
+  439  else:   # "absorb" (default)
+  440      kv_cache: (batch, seq, 512)            # ← latent c
+  441      pe_cache: (batch, seq, 64)             # ← k_pe
+
+  Implementation ၂ မျိုး ပါပါတယ် (model.py:17 မှာ attn_impl = "absorb" က default):
+  - naive : နားလည်ရ လွယ်ပေမယ့် cache ကြီးပါတယ်။
+  - absorb: MLA ရဲ့ တကယ့်အားသာချက်ကို အသုံးချပါတယ်။
+
+  [မှတ်ချက်] kv_cache မှာ head dimension မရှိပါဘူး။ Head အားလုံး latent
+  တစ်ခုတည်းကို မျှသုံးလို့ပါ။ (ဒါကြောင့် GPU တိုင်းက cache အပြည့် ကိုယ်စီ
+  သိမ်းထားရပေမယ့် GPU တစ်လုံးချင်းအလိုက် ကြည့်ရင်တောင် naive ထက် ~၄.၄ ဆ
+  သေးပါတယ်။)
+
+၅.၃ forward: Q, K ပြင်ဆင်ခြင်း (Line 456-467)
+--------------------------------------------------------------------------------
+  456  bsz, seqlen, _ = x.size()
+  457  end_pos = start_pos + seqlen         # cache ထဲ ဘယ်နေရာအထိ ရေးမလဲ
+
+[Query]
+  461  q = self.wq_b(self.q_norm(self.wq_a(x)))     # 7168 → 1536 → 128x192
+  462  q = q.view(bsz, seqlen, self.n_local_heads, self.qk_head_dim)   # head အလိုက် ခွဲ
+  463  q_nope, q_pe = torch.split(q, [128, 64], dim=-1)    # အကြောင်းအရာ | နေရာ
+  464  q_pe = apply_rotary_emb(q_pe, freqs_cis)            # နေရာအပိုင်းကိုပဲ RoPE လှည့်
+
+[Key/Value (ချုံ့ထားတဲ့ ပုံစံ)]
+  465  kv = self.wkv_a(x)                                  # 7168 → 576
+  466  kv, k_pe = torch.split(kv, [512, 64], dim=-1)       # latent c | position key
+  467  k_pe = apply_rotary_emb(k_pe.unsqueeze(2), freqs_cis)   # RoPE လှည့် (head 1 ခုတည်း)
+
+[ဘာကြောင့် "nope" နဲ့ "rope" ခွဲရတာလဲ? (Decoupled RoPE)]
+
+  RoPE ဆိုတာ vector ကို token ရဲ့ နေရာ (position) ပေါ်မူတည်ပြီး လှည့်
+  (rotate) လိုက်တာပါ။ ဒါမှ မော်ဒယ်က "ဒီစကားလုံး ဘယ်နေရာမှာလဲ" ကို သိပါတယ်။
+
+  ပြဿနာက နောက်အပိုင်းမှာ ပြမယ့် absorb trick က W_UK ကို Q ထဲ "စုပ်ယူ
+  (absorb)" ဖို့ လိုပါတယ်။ ဒါပေမယ့် K ကို position အလိုက် လှည့်ထားရင် W_UK
+  နဲ့ Q ကြားမှာ position ပေါ်မူတည်တဲ့ rotation matrix ညှပ်နေလို့ ကြိုမပေါင်း
+  နိုင်တော့ပါဘူး။
+
+  ဖြေရှင်းနည်း: Vector ကို ၂ ပိုင်း ခွဲပါတယ်:
+    - nope (128): RoPE မထည့် → absorb trick သုံးလို့ရ
+    - rope (64) : RoPE ထည့် → သီးသန့် တွက်၊ head အားလုံး k_pe တစ်ခုတည်း
+                  မျှသုံး (cache သေးအောင်)
+
+      score = (q_nope · k_nope) + (q_pe · k_pe)
+               ↑ အကြောင်းအရာ ဆင်တူမှု   ↑ နေရာ ဆက်နွယ်မှု
+
+၅.၄ Attention Score တွက်ခြင်း: Naive vs Absorb
+--------------------------------------------------------------------------------
+[(က) Naive Mode, Line 468-476: နားလည်ရ လွယ်တဲ့ နည်း]
+
+  469  q = torch.cat([q_nope, q_pe], dim=-1)               # (b, s, h, 192)
+  470  kv = self.wkv_b(self.kv_norm(kv))                   # latent 512 → h x 256 (ဖြည်)
+  471  kv = kv.view(bsz, seqlen, self.n_local_heads, 128 + 128)
+  472  k_nope, v = torch.split(kv, [128, 128], dim=-1)
+  473  k = torch.cat([k_nope, k_pe.expand(-1, -1, self.n_local_heads, -1)], dim=-1)
+                                                          # k_pe ကို head အားလုံးဆီ ကူး
+  474  self.k_cache[:bsz, start_pos:end_pos] = k           # ဖြည်ပြီးသား K ကို သိမ်း (ကြီး!)
+  475  self.v_cache[:bsz, start_pos:end_pos] = v
+  476  scores = torch.einsum("bshd,bthd->bsht", q, self.k_cache[:bsz, :end_pos]) * self.softmax_scale
+
+  ချုံ့ပြီး ချက်ချင်း ပြန်ဖြည်ပြီး ဖြည်ထားတဲ့ K, V ကို cache လုပ်ပါတယ်။
+  ပုံမှန် MHA နဲ့ အတူတူပါပဲ။ MLA ရဲ့ cache အားသာချက် မရပါဘူး။
+
+  einsum သင်္ကေတ ဖတ်ပုံ: b=batch, s=query position, t=key position (cache
+  ထဲက), h=head, d=dimension။ "bshd,bthd->bsht" ဆိုတာ d ပေါ်မှာ dot product
+  တွက်ပြီး query s တိုင်းနဲ့ key t တိုင်းကြား score ထုတ်ပါတယ်။
+
+[(ခ) Absorb Mode, Line 477-484: MLA ရဲ့ လှည့်ကွက်]
+
+  သင်္ချာ အရင်ကြည့်ပါ။ c = latent (512)၊ W_UK = key ချဲ့တဲ့ matrix
+  (128 x 512) ဆိုရင်:
+
+      k_nope = W_UK · c
+
+      score = q_nope · k_nope
+            = q_nope · (W_UK · c)
+            = (W_UKᵀ · q_nope) · c          ← matrix မြှောက်ခြင်းရဲ့ associativity
+              └──── q_absorbed (512) ────┘
+
+  K ကို ဖြည်စရာ မလိုပါဘူး! Q ကို latent space ထဲ ပြောင်းလိုက်ရုံနဲ့ cache
+  ထဲက c နဲ့ တိုက်ရိုက် နှိုင်းယှဉ်လို့ ရပါတယ်။
+
+  ဘာကြောင့် ပိုကောင်းလဲ: Q က token အသစ် ၁ ခုပဲ ရှိပေမယ့် K က cache ထဲမှာ
+  token ထောင်ချီ ရှိပါတယ်။ ၁ ခုကို ပြောင်းတာက ထောင်ချီကို ဖြည်တာထက်
+  အများကြီး သက်သာပါတယ်။
+
+  478  wkv_b = self.wkv_b.weight if self.wkv_b.scale is None else weight_dequant(self.wkv_b.weight, self.wkv_b.scale, block_size)
+  wkv_b weight ကို တိုက်ရိုက် သုံးမှာမို့ FP8 ဖြစ်နေရင် BF16 ပြန်ပြောင်းပါတယ်
+  (kernel.py က weight_dequant)။ (ဒီ dequant ကို forward တိုင်း ပြန်လုပ်နေတာက
+  အလုပ်ပိုပါတယ်။ Cache လုပ်ထားလို့ ရပါတယ်။)
+
+  479  wkv_b = wkv_b.view(self.n_local_heads, -1, self.kv_lora_rank)     # (h, 256, 512)
+  Shape (h, 256, 512) ထဲမှာ:
+    wkv_b[:, :128]  = W_UK (key အတွက်)
+    wkv_b[:, -128:] = W_UV (value အတွက်)
+
+  480  q_nope = torch.einsum("bshd,hdc->bshc", q_nope, wkv_b[:, :self.qk_nope_head_dim])
+  Absorb အဆင့်: q_nope (128) x W_UK ဆိုတော့ q_absorbed (512) ရပါတယ်။ Head
+  တစ်ခုစီက ကိုယ်ပိုင် W_UK နဲ့ မြှောက်ပါတယ်။
+
+  481  self.kv_cache[:bsz, start_pos:end_pos] = self.kv_norm(kv)    # latent c (512) ကိုပဲ သိမ်း
+  482  self.pe_cache[:bsz, start_pos:end_pos] = k_pe.squeeze(2)     # k_pe (64) ကို သိမ်း
+  ချုံ့ထားတဲ့ ပုံစံအတိုင်း cache ထဲ သိမ်းပါတယ်။ Token တစ်ခုလျှင် 576 ဂဏန်းပဲ
+  ရှိပါတယ်။
+
+  483  scores = (torch.einsum("bshc,btc->bsht", q_nope, self.kv_cache[:bsz, :end_pos]) +   # content
+  484            torch.einsum("bshr,btr->bsht", q_pe, self.pe_cache[:bsz, :end_pos])) * self.softmax_scale  # position
+  Score ၂ ပိုင်း ပေါင်းပါတယ်:
+    - q_absorbed (512) · c (512)  : အကြောင်းအရာ
+    - q_pe (64) · k_pe (64)       : နေရာ
+  ဒါက naive ရဲ့ q (192) · k (192) နဲ့ သင်္ချာအရ တူညီပါတယ်။
+
+၅.၅ Mask နဲ့ Softmax (Line 485-487)
+--------------------------------------------------------------------------------
+  485  if mask is not None:
+  486      scores += mask.unsqueeze(1)                      # head dimension အတွက် broadcast
+  487  scores = scores.softmax(dim=-1, dtype=torch.float32).type_as(x)
+
+  - Causal mask (model.py:785 မှာ ဆောက်ပါတယ်) က အနာဂတ် token ကို မကြည့်ရအောင်
+    တားပါတယ်:
+               t0    t1    t2
+      s0  [    0   -inf  -inf ]
+      s1  [    0     0   -inf ]
+      s2  [    0     0     0  ]
+    -inf ကို softmax ဖြတ်ရင် 0 ဖြစ်ပါတယ်။
+  - Prefill (token အများ) မှာပဲ mask လိုပါတယ်။ Decode (token ၁ ခု) မှာ ရှေ့က
+    token အားလုံးကို ကြည့်ခွင့်ရှိလို့ mask = None ပါ။
+  - Softmax ကို float32 နဲ့ တွက်ပါတယ်။ BF16 နဲ့ဆို exp() တွက်ချက်မှု
+    မတိကျပါဘူး။
+
+  [မှတ်ချက်] Mask ရဲ့ shape က (seqlen, seqlen) ဖြစ်ပြီး scores ရဲ့ shape က
+  (…, end_pos) ပါ။ Prefill ကို start_pos = 0 ကနေပဲ အမြဲ စလို့ ကိုက်ညီပါတယ်။
+  Cache ရှိပြီးသားပေါ်မှာ token အများကြီး ထပ်ထည့်ရင် (chunked prefill) shape
+  မကိုက်တော့ပါဘူး။
+
+၅.၆ Output တွက်ခြင်း (Line 488-494)
+--------------------------------------------------------------------------------
+[Naive]
+  489  x = torch.einsum("bsht,bthd->bshd", scores, self.v_cache[:bsz, :end_pos])   # Σ score x V
+
+[Absorb: Value ဘက်မှာလည်း absorb trick]
+      output = Σₜ pₜ · vₜ
+             = Σₜ pₜ · (W_UV · cₜ)
+             = W_UV · (Σₜ pₜ · cₜ)       ← latent တွေကို အရင်ပေါင်း၊ နောက်မှ တစ်ကြိမ်တည်း ချဲ့
+
+  491  x = torch.einsum("bsht,btc->bshc", scores, self.kv_cache[:bsz, :end_pos])   # Σ p x c  → (512)
+  492  x = torch.einsum("bshc,hdc->bshd", x, wkv_b[:, -self.v_head_dim:])           # x W_UV → (128)
+  - Line 491: Latent space ထဲမှာပဲ အလေးချိန်နဲ့ ပေါင်းပါတယ် (token ထောင်ချီ → 1)။
+  - Line 492: ပေါင်းပြီးသား vector တစ်ခုတည်းကို V အဖြစ် ချဲ့ပါတယ်။
+
+  493  x = self.wo(x.flatten(2))      # (b, s, h x 128) → (b, s, 7168), head အားလုံး ပေါင်း
+  494  return x
+  wo က RowParallelLinear ဖြစ်လို့ အထဲမှာ all_reduce ပါပြီး GPU ၁၆ လုံးရဲ့
+  head အပိုင်းတွေကို ပေါင်းပေးပါတယ်။
+
+၅.၇ Flow တစ်ခုလုံး (Absorb mode)
+--------------------------------------------------------------------------------
+  x (7168)
+   │
+   ├──► wq_a → norm → wq_b ──► q (h x 192)
+   │                             ├─ q_nope (128) ──x W_UK──► q_absorbed (512) ─┐
+   │                             └─ q_pe (64) ──RoPE──► q_pe ──────────────────┐│
+   │                                                                            ││
+   └──► wkv_a ──► (576)                                                         ││
+                 ├─ c (512) ──norm──► [kv_cache] ─────────────────────────────┐ ││
+                 └─ k_pe (64) ──RoPE──► [pe_cache] ─────────────────────────┐ │ ││
+                                                                            │ │ ││
+                  score = q_absorbed·c  +  q_pe·k_pe   ◄────────────────────┴─┴─┴┘
+                            │
+                       mask → softmax (p)
+                            │
+                     Σ p·c  (512)   ◄── kv_cache ကို ပြန်သုံး
+                            │
+                         x W_UV  → (h x 128)
+                            │
+                           wo   → (7168)
+
+၅.၈ နှိုင်းယှဉ်ချက်
+--------------------------------------------------------------------------------
+                              ပုံမှန် MHA / Naive    | MLA Absorb
+  ---------------------------+----------------------+---------------------
+  Cache ထဲ သိမ်းတာ            | K, V (head တိုင်း)    | c + k_pe (မျှသုံး)
+  Token/layer cache          | 40,960               | 576
+  Token 16K x batch 8 cache  | ≈ 640 GB             | ≈ 9 GB
+  K/V ဖြည်ခြင်း                | Token တိုင်း          | မလို (absorb)
+  သင်္ချာ ရလဒ်                  | တူညီ                 | တူညီ
+
+၅.၉ အဓိက မှတ်သားစရာ ၄ ချက်
+--------------------------------------------------------------------------------
+  1. Low-rank compression: KV ကို 512-dim latent c အဖြစ် ချုံ့ပြီး အဲဒါကိုပဲ
+     cache လုပ်ပါတယ်။
+  2. Absorb trick: W_UK ကို Q ထဲ၊ W_UV ကို output ထဲ ပေါင်းထည့်လိုက်လို့ cache
+     ကို ဘယ်တော့မှ မဖြည်ရပါဘူး။
+  3. Decoupled RoPE: Position အချက်အလက်ကို 64-dim သီးသန့်အပိုင်းမှာ ထားလို့
+     absorb trick နဲ့ ပဋိပက္ခ မဖြစ်ပါဘူး။
+  4. ရလဒ်က naive နဲ့ တူတူပဲ။ ပြောင်းလဲတာက တွက်တဲ့ အစီအစဉ်ပဲ ဖြစ်ပြီး memory
+     အများကြီး သက်သာပါတယ်။
+
+
+################################################################################
+  အပိုင်း ၆။ RoPE + YaRN : Position (နေရာ) ကို မော်ဒယ်က ဘယ်လိုသိလဲ
+################################################################################
+
+Code: inference/model.py:294-391
+
+၆.၀ နောက်ခံ: ပြဿနာက ဘာလဲ
+--------------------------------------------------------------------------------
+Attention က token တွေကို "အိတ်ထဲ ပစ်ထည့်ထားသလို" ကြည့်ပါတယ်။ နေရာကို
+သတိမထားပါဘူး။ ဆိုလိုတာက:
+    "ခွေး က ကြောင် ကို ကိုက်တယ်"
+    "ကြောင် က ခွေး ကို ကိုက်တယ်"
+ဒီ ၂ ကြောင်းကို position အချက်အလက် မထည့်ရင် attention က ခွဲမသိနိုင်ပါဘူး။
+ဒါကြောင့် "ဒီ token က ဘယ်နေရာမှာလဲ" ဆိုတာကို ထည့်ပေးရပါတယ်။
+
+၆.၁ RoPE (Rotary Position Embedding) ဆိုတာ
+--------------------------------------------------------------------------------
+[အဓိက အိုင်ဒီယာ: နာရီလက်တံ]
+
+Vector ကို ဂဏန်း ၂ လုံးတစ်တွဲစီ ခွဲပြီး တွဲတစ်ခုစီကို 2D မျက်နှာပြင်ပေါ်က
+မြှား (arrow) လို့ မြင်ကြည့်ပါ။ Position m မှာရှိတဲ့ token ရဲ့ မြှားကို
+m x θ ထောင့် လှည့်လိုက်ပါတယ်:
+    position 0:  →          (0° လှည့်)
+    position 1:  ↗          (θ လှည့်)
+    position 2:  ↑          (2θ လှည့်)
+    position 3:  ↖          (3θ လှည့်)
+
+[ဘာကြောင့် "လှည့်" တာလဲ? Relative position]
+
+Query က position m၊ Key က position n မှာ ရှိတယ်ဆိုပါစို့:
+    q ကို mθ လှည့်၊  k ကို nθ လှည့်
+    q · k  ←  ထောင့် ၂ ခုရဲ့ ကွာခြားချက် (m − n)θ ပေါ်ပဲ မူတည်
+Dot product က ကြားအကွာအဝေး (m − n) ကိုပဲ သိပါတယ်။ Position 5 နဲ့ 3 ဖြစ်ဖြစ်၊
+1005 နဲ့ 1003 ဖြစ်ဖြစ် "၂ နေရာ ကွာတယ်" လို့ တူတူ နားလည်ပါတယ်။ ဘာသာစကား
+အတွက် ဒါက အရေးကြီးပါတယ်။ "ကိုက်တယ်" ရဲ့ ရှေ့ ၂ လုံးမှာ ဘာရှိလဲ ဆိုတာက
+စာကြောင်းရဲ့ ဘယ်နေရာမှာ ဖြစ်ဖြစ် အဓိပ္ပာယ် တူလို့ပါ။
+
+[Frequency အမျိုးမျိုး: နာရီရဲ့ လက်တံ အမျိုးမျိုး]
+
+qk_rope_head_dim = 64 ဆိုတော့ တွဲ ၃၂ တွဲ ရှိပါတယ်။ တွဲတစ်ခုစီက အမြန်နှုန်း
+မတူပါဘူး:
+    တွဲ 0:   အမြန်ဆုံး လှည့် (စက္ကန့်လက်တံ)  → အနီးကပ် နေရာကွာခြားမှုကို သိ
+    ...
+    တွဲ 31:  အနှေးဆုံး လှည့် (နာရီလက်တံ)     → အဝေးကြီး နေရာကွာခြားမှုကို သိ
+နာရီမှာ လက်တံ ၃ ချောင်း ပေါင်းကြည့်ရင် အချိန်အတိအကျ သိရသလို frequency ၃၂
+မျိုး ပေါင်းပြီး position ကို တိတိကျကျ ကိုယ်စားပြုပါတယ်။
+
+၆.၂ YaRN: Context ကို ချဲ့ခြင်း
+--------------------------------------------------------------------------------
+ပြဿနာ: မော်ဒယ်ကို token 4,096 (original_seq_len) နဲ့ training လုပ်ထားပါတယ်။
+အနှေးဆုံး လက်တံတွေက 4K အတွင်းမှာ တစ်ပတ်တောင် မပြည့်သေးပါဘူး။ Position
+100K မှာဆိုရင် အဲဒီလက်တံတွေက မော်ဒယ် တစ်ခါမှ မမြင်ဖူးတဲ့ ထောင့်တွေကို
+ရောက်သွားလို့ မော်ဒယ် ရှုပ်ထွေးသွားပါတယ်။
+
+ဖြေရှင်းနည်း: လက်တံအမျိုးအစားအလိုက် ကွဲပြားစွာ ကိုင်တွယ်
+  - အမြန်လက်တံ (4K အတွင်း အကြိမ်ကြိမ် လှည့်ပြီးသား): ထောင့်အားလုံး မြင်ဖူး
+    ပြီးသားမို့ မပြောင်းပါဘူး။ အနီးကပ် အသေးစိတ်ကို ထိန်းထားဖို့ အရေးကြီးပါတယ်။
+  - အနှေးလက်တံ (တစ်ပတ်တောင် မပြည့်): 40 ဆ နှေးအောင် လုပ်ပါတယ်။ ဒါမှ 160K
+    (4K x 40) အထိ မြင်ဖူးတဲ့ ထောင့်အတွင်းမှာပဲ ရှိနေမှာပါ (interpolation)။
+  - ကြားက လက်တံ: ၂ မျိုးကြား ချောချောမွေ့မွေ့ ရောပါတယ်။
+
+၆.၃ precompute_freqs_cis(): Code အသေးစိတ် (Line 294-372)
+--------------------------------------------------------------------------------
+Position တိုင်းအတွက် လှည့်ရမယ့် ထောင့်ကို ကြိုတွက်ထားပါတယ်။ မော်ဒယ်
+ဆောက်တုန်း တစ်ကြိမ်တည်း ခေါ်ပါတယ် (model.py:766)။
+
+[Parameter များ, Line 304-309]
+  304  dim = args.qk_rope_head_dim     # 64
+  305  seqlen = args.max_seq_len       # 16384 (default)
+  306  beta_fast = args.beta_fast      # 32 → "ပတ် 32 ပတ်ထက် ပိုလှည့်ရင် အမြန်လက်တံ"
+  307  beta_slow = args.beta_slow      # 1  → "၁ ပတ်ထက် နည်းရင် အနှေးလက်တံ"
+  308  base = args.rope_theta          # 10000
+  309  factor = args.rope_factor       # 40 → context ချဲ့တဲ့ အဆ
+
+[Helper ၁: find_correction_dim, Line 311-324]
+  324  return dim * math.log(max_seq_len / (num_rotations * 2 * math.pi)) / (2 * math.log(base))
+  "4,096 token အတွင်း num_rotations ပတ် အတိအကျ လှည့်တဲ့ တွဲက ဘယ်နံပါတ်လဲ"
+  ကို ပြောင်းပြန် တွက်ပါတယ်။
+  သင်္ချာ: တွဲ i ရဲ့ wavelength (တစ်ပတ်ပြည့်ဖို့ လိုတဲ့ token အရေအတွက်)
+  = 2π · base^(2i/dim) ဖြစ်ပါတယ်။ ဒါကို 4096 / num_rotations နဲ့ ညီအောင်
+  ထားပြီး i ကို ဖြေရှင်းရင် ဒီ formula ရပါတယ်။
+
+[Helper ၂: find_correction_range, Line 326-342]
+  340  low = math.floor(find_correction_dim(low_rot, ...))     # beta_fast = 32 ပတ်
+  341  high = math.ceil(find_correction_dim(high_rot, ...))    # beta_slow = 1 ပတ်
+  342  return max(low, 0), min(high, dim-1)
+
+  တကယ့် တန်ဖိုး တွက်ကြည့်ရင် (dim=64, base=10000, L=4096):
+    32 ပတ်:  64 x ln(4096 / (32 x 2π)) / (2 x ln 10000) = 10.47  → floor → low  = 10
+     1 ပတ်:  64 x ln(4096 / ( 1 x 2π)) / (2 x ln 10000) = 22.52  → ceil  → high = 23
+
+[Helper ၃: linear_ramp_factor, Line 344-361]
+  357  if min == max:
+  358      max += 0.001                      # သုညနဲ့ စားခြင်း ကာကွယ်
+  359  linear_func = (torch.arange(dim, dtype=torch.float32) - min) / (max - min)
+  360  ramp_func = torch.clamp(linear_func, 0, 1)
+  low အထိ 0၊ high ကနေ 1၊ ကြားမှာ တဖြည်းဖြည်း တက်တဲ့ "လှေကားရပ် (ramp)" ပါ:
+    တွဲ:   0 ... 10   11   12  ...  22   23 ... 31
+    ramp:  0 ...  0  .08  .15  ...  .92   1 ...  1
+
+[အဓိက တွက်ချက်မှု, Line 363-367]
+  363  freqs = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+  တွဲ ၃၂ တွဲရဲ့ မူလ RoPE frequency:
+    freq[i] = 1 / 10000^(2i/64)
+    freq[0]  = 1.0        (wavelength ≈ 6 token)       ← အမြန်ဆုံး
+    freq[10] ≈ 0.056      (wavelength ≈ 112 token)
+    freq[23] ≈ 0.00056    (wavelength ≈ 11,200 token)
+    freq[31] ≈ 0.00013    (wavelength ≈ 47,000 token)  ← အနှေးဆုံး
+
+  364  if seqlen > args.original_seq_len:                  # 16384 > 4096 ဆိုရင်ပဲ YaRN သုံး
+  365      low, high = find_correction_range(beta_fast, beta_slow, dim, base, args.original_seq_len)   # 10, 23
+  366      smooth = 1 - linear_ramp_factor(low, high, dim // 2)
+  367      freqs = freqs / factor * (1 - smooth) + freqs * smooth
+  Line 367 က အလေးချိန်နဲ့ ရောခြင်း (blend) ပါ:
+    freqs_new = (freqs / 40) x (1 − smooth)  +  freqs x smooth
+                 └── interpolated ──┘           └ မူလ ┘
+
+    တွဲ      | smooth | ရလဒ်       | အဓိပ္ပာယ်
+    ---------+--------+------------+---------------------------
+    0 – 10   | 1      | freqs      | အမြန်လက်တံ, မပြောင်း
+    11 – 22  | 1 → 0  | ရော        | တဖြည်းဖြည်း ပြောင်း
+    23 – 31  | 0      | freqs / 40 | အနှေးလက်တံ, ၄၀ ဆ နှေးအောင်
+
+[Position တိုင်းအတွက် ထောင့်တွက်ခြင်း, Line 369-372]
+  369  t = torch.arange(seqlen)                   # [0, 1, 2, ..., 16383]
+  370  freqs = torch.outer(t, freqs)              # (16384, 32): ထောင့် = position x frequency
+  371  freqs_cis = torch.polar(torch.ones_like(freqs), freqs)    # e^(iθ) = cos θ + i sin θ
+  372  return freqs_cis
+  - Line 370: outer က position m နဲ့ တွဲ i တိုင်းအတွက် m x freq[i] ကို
+    ဇယားအဖြစ် တွက်ပါတယ်။
+  - Line 371: polar(r=1, θ) က အရှည် 1၊ ထောင့် θ ရှိတဲ့ complex number ကို
+    ဆောက်ပါတယ်။ ဒါက "θ လှည့်ပါ" ဆိုတဲ့ ညွှန်ကြားချက်ပါ။
+
+  ရလဒ် freqs_cis ရဲ့ shape က (16384, 32) complex ဖြစ်ပြီး buffer အဖြစ်
+  သိမ်းထားပါတယ်။ Forward တိုင်းမှာ လိုတဲ့ position အပိုင်းကိုပဲ ဖြတ်ယူပါတယ်
+  (model.py:782):
+    freqs_cis = self.freqs_cis[start_pos:start_pos+seqlen]
+
+၆.၄ apply_rotary_emb(): တကယ်လှည့်ခြင်း (Line 375-390)
+--------------------------------------------------------------------------------
+[Complex number လှည့်ကွက်]
+
+2D vector (a, b) ကို θ ထောင့် လှည့်ဖို့ ပုံမှန်ဆိုရင် rotation matrix လိုပါတယ်:
+    [a']   [cos θ  −sin θ] [a]
+    [b'] = [sin θ   cos θ] [b]
+ဒါပေမယ့် (a, b) ကို complex number a + ib လို့ သဘောထားရင် e^(iθ) နဲ့
+မြှောက်လိုက်ရုံနဲ့ လှည့်ပြီးသား ဖြစ်ပါတယ်:
+    (a + ib) x (cos θ + i sin θ) = (a cos θ − b sin θ) + i(a sin θ + b cos θ)
+ရလဒ် တူတူပဲ ဖြစ်ပြီး code ပိုရိုးရှင်းပါတယ်။
+
+[Code]
+  386  dtype = x.dtype                                         # မူလ dtype (BF16) မှတ်ထား
+  387  x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
+    - x ရဲ့ shape: (batch, seq, heads, 64)
+    - .view(..., -1, 2) ဆိုတော့ (batch, seq, heads, 32, 2): ကပ်လျက် ၂ လုံး တွဲ
+    - view_as_complex ဆိုတော့ (batch, seq, heads, 32) complex
+    - .float(): complex လုပ်ဖို့ float32 လိုပါတယ် (BF16 complex မရှိပါဘူး)
+
+        [x0, x1, x2, x3, ..., x62, x63]
+          ↓
+        [x0+ix1, x2+ix3, ..., x62+ix63]    ← complex 32 ခု
+
+  388  freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1))    # (1, seq, 1, 32)
+  Broadcasting အတွက် shape ပြင်ပါတယ်။ Batch ဘက်နဲ့ head ဘက်မှာ 1 ထားလို့
+  batch တိုင်း၊ head တိုင်းက ထောင့်တူတူ သုံးပါတယ် (position ပေါ်ပဲ မူတည်လို့)။
+
+  389  y = torch.view_as_real(x * freqs_cis).flatten(3)     # လှည့် → real ပြန်ပြောင်း → 64 ပြန်ပြား
+  390  return y.to(dtype)                                   # BF16 ပြန်ပြောင်း
+    - x * freqs_cis: လှည့်ခြင်း (complex မြှောက်)
+    - view_as_real : (…, 32) complex ကနေ (…, 32, 2) real ဖြစ်ပါတယ်
+    - flatten(3)   : (…, 64) ပြန်ဖြစ်ပါတယ်
+
+[ဥပမာ]
+  Position m = 5၊ တွဲ 0 (freq = 1.0)၊ vector (1, 0):
+    θ = 5 x 1.0 = 5 rad ≈ 286°
+    (1 + 0i) x (cos 5 + i sin 5) = 0.28 − 0.96i  →  (0.28, −0.96)
+
+[မှတ်ချက်] ဒီ code က ကပ်လျက်တွဲ (x0,x1), (x2,x3), … ပုံစံ (interleaved) နဲ့
+တွဲပါတယ်။ HuggingFace ရဲ့ Llama-style code အများစုက (x0, x32), (x1, x33), …
+(rotate_half) ပုံစံ သုံးပါတယ်။ Weight layout ကွဲလို့ ၂ မျိုးကြား weight
+တိုက်ရိုက် ကူးသုံးလို့ မရပါဘူး။
+
+၆.၅ MLA နဲ့ ဆက်စပ်ပုံ (ပြန်သတိရရန်)
+--------------------------------------------------------------------------------
+MLA မှာ RoPE ကို 64-dim အပိုင်း (q_pe, k_pe) မှာပဲ သုံးပါတယ် (model.py:464,
+model.py:467)။ ကျန်တဲ့ 128-dim (nope) မှာ မသုံးပါဘူး (absorb trick အတွက်)။
+ဒါကြောင့် qk_rope_head_dim = 64 ကို dim အဖြစ် သုံးတာပါ။
+
+YaRN မှာ အပိုင်း ၂ ခု ပါပါတယ်:
+  1. Frequency ပြင်ခြင်း: ဒီဖိုင်ရဲ့ line 364-367
+  2. Attention temperature ပြင်ခြင်း (mscale): MLA ရဲ့ softmax_scale
+     (model.py:432-434)
+       mscale = 0.1 x ln(40) + 1 ≈ 1.37,   softmax_scale x 1.37² ≈ x 1.87
+     Interpolation လုပ်လိုက်တော့ attention က ပျံ့နှံ့သွားတတ်လို့ ပြန်စူးရှ
+     အောင် လုပ်ပါတယ်။
+
+၆.၆ Flow တစ်ခုလုံး
+--------------------------------------------------------------------------------
+  မော်ဒယ်ဆောက်တုန်း (တစ်ကြိမ်):
+     freq[i] = 1/10000^(2i/64)            ← မူလ RoPE (တွဲ 32)
+          │
+     YaRN blend (တွဲ 0-10 မပြောင်း၊ 23-31 ÷40၊ ကြား ရော)
+          │
+     x position [0..16383]  →  e^(iθ)  →  freqs_cis (16384 x 32)
+
+  Forward တိုင်း:
+     freqs_cis[start_pos : start_pos+seqlen]
+          │
+     q_pe, k_pe (64) → complex (32) → x e^(iθ) → real (64)
+          │
+     score = q_pe · k_pe   ← (m − n) ကွာခြားချက်ကိုပဲ သိ
+
+၆.၇ အဓိက မှတ်သားစရာ ၄ ချက်
+--------------------------------------------------------------------------------
+  1. RoPE က vector တွဲတွေကို position အလိုက် လှည့်ပြီး dot product မှာ
+     relative position ပေါ်လာစေပါတယ်။
+  2. Frequency ၃၂ မျိုး က အနီး/အဝေး ကွာခြားချက်တွေကို အဆင့်ဆင့် ဖမ်းယူပါတယ်။
+  3. YaRN က အမြန်လက်တံကို မထိဘဲ အနှေးလက်တံကိုပဲ ၄၀ ဆ နှေးအောင် လုပ်ပြီး
+     4K training → 128K+ context ကို ဖြစ်စေပါတယ်။
+  4. Complex number မြှောက်ခြင်း = 2D လှည့်ခြင်း ဖြစ်လို့ code တိုပြီး မြန်ပါတယ်။
+
+
+================================================================================
+  ကျန်ရှိသေးသော အပိုင်းများ (မရှင်းရသေး)
+================================================================================
+  - Tensor Parallel Linear layer များ (model.py:87-265): GPU ၁၆ လုံးပေါ် weight ခွဲပုံ
+  - convert.py / fp8_cast_bf16.py : weight ဖိုင် ပြောင်းပုံ
+================================================================================
